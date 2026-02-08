@@ -1,0 +1,11 @@
+name = "todoless-mcp-server"
+main = "src/worker.mjs"
+compatibility_date = "2026-02-07"
+workers_dev = true
+
+[vars]
+TODOLESS_API_BASE_URL = "https://todoless-api.formahsa.workers.dev"
+
+[[services]]
+binding = "TODOLESS_API"
+service = "todoless-api"

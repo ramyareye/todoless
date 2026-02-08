@@ -1,0 +1,17 @@
+# Node
+node_modules/
+
+# Build/cache
+.wrangler/
+.dist/
+dist/
+
+# Env files
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+
+# MacOS
+.DS_Store

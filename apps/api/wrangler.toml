@@ -1,0 +1,12 @@
+name = "todoless-api"
+main = "src/index.ts"
+compatibility_date = "2026-02-05"
+
+[vars]
+ENVIRONMENT = "prod"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "todoless"
+database_id = "d6002736-cd35-40d6-be75-1d1843fe99fa"
+migrations_dir = "migrations"

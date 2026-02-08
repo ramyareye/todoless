@@ -1,0 +1,31 @@
+# Todoless - Local TODO (safe to keep when resetting DB)
+#
+# Generated: 2026-02-07
+# Workspace referenced previously: grow (ws_6397add15bc6424d9a55c6df0d085301)
+#
+# Notes:
+# - This file is the source of truth for these items (not the database).
+# - Do NOT put live API keys/secrets in this file.
+#
+
+P0 [ ] Protect hosted MCP endpoint with MCP_AUTH_TOKEN
+    - Set MCP_AUTH_TOKEN secret on the MCP Worker and require bearer token in clients.
+
+P0 [ ] Rotate grow workspace API key + revoke old
+    - Create new scoped key (workspace:read/write)
+    - Update MCP Worker secret TODOLESS_API_KEY
+    - Revoke the old key
+
+P1 [ ] Release: commit + push repo; ensure CI green
+    - Commit current changes (api + mcp + docs + ci)
+    - Push and confirm GitHub Actions passes
+
+P2 [ ] Production: monitoring/logging for API and MCP workers
+    - Minimal observability + runbook (tail logs, error tracking)
+
+P2 [ ] Production: rate limit hosted MCP endpoint
+    - Basic per-token rate limiting for /mcp to prevent abuse
+
+P3 [ ] Backlog: import other project tasks into grow
+    - Later: add tasks from other projects into this workspace
+
