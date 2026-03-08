@@ -11,9 +11,9 @@
     "deploy:http": "wrangler deploy"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.17.5"
+    "@modelcontextprotocol/sdk": "^1.27.1"
   },
   "devDependencies": {
-    "wrangler": "^4.63.0"
+    "wrangler": "^4.71.0"
   }
 }

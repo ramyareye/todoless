@@ -6,8 +6,10 @@ export function registerMeRoutes(app: Hono<AppEnv>) {
   app.get('/v1/me', (c) => {
     const principal = c.get('principal');
     return ok(c, {
-      user_id: principal.userId,
-      email: principal.email,
+      user: {
+        id: principal.userId,
+        email: principal.email,
+      },
       scopes: principal.scopes,
       api_key_id: principal.apiKeyId,
     });

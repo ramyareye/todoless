@@ -86,6 +86,18 @@ http_call "$BASE_URL/v1/workspaces/$WS_B" \
   -H "authorization: Bearer $API_KEY_A"
 assert_status 404 "non-member workspace access"
 
+echo "[test-api] me shape"
+http_call "$BASE_URL/v1/me" \
+  -H "authorization: Bearer $API_KEY_A"
+assert_status 200 "me"
+assert_success "me"
+ME_USER_ID="$(printf '%s' "$HTTP_BODY" | json_read 'data.data.user.id')"
+ME_EMAIL="$(printf '%s' "$HTTP_BODY" | json_read 'data.data.user.email')"
+if [[ -z "$ME_USER_ID" || "$ME_EMAIL" != "$EMAIL_A" ]]; then
+  echo "[test-api] me shape failed: expected nested user payload for $EMAIL_A got $HTTP_BODY" >&2
+  exit 1
+fi
+
 echo "[test-api] create members"
 MEMBER1_INVITE_TOKEN=""
 MEMBER1_USER_ID=""

@@ -10,7 +10,7 @@ Run with local dev server active (`npm run dev`).
 ## 2. Auth and identity
 - [ ] `POST /v1/auth/register` returns user, workspace, one-time API key
 - [ ] `POST /v1/auth/claim-invite` redeems a one-time invite token for a personal API key
-- [ ] `GET /v1/me` works with key
+- [ ] `GET /v1/me` works with key and returns nested `user`
 - [ ] Invalid/missing bearer token returns `401`
 - [ ] Revoked key returns `401`
 

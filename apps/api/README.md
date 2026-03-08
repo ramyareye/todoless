@@ -83,6 +83,23 @@ curl -X POST http://localhost:8787/v1/auth/register \
 
 The response returns a personal API key once. Persist it securely. That key is user-based, so `/v1/workspaces` reflects the workspaces where that user has membership.
 
+## Current principal
+`GET /v1/me` returns the authenticated principal in this shape:
+
+```json
+{
+  "success": true,
+  "data": {
+    "user": {
+      "id": "usr_...",
+      "email": "founder@example.com"
+    },
+    "scopes": ["workspace:read", "workspace:write"],
+    "api_key_id": "key_..."
+  }
+}
+```
+
 ## Invited member claim flow
 When an admin adds a member with `POST /v1/workspaces/:workspaceId/members`, the response includes a one-time `invite_token`.
 It also includes `invite_url`, which can be sent directly to the user.
