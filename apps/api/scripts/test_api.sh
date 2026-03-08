@@ -84,9 +84,12 @@ WS_B="$(printf '%s' "$HTTP_BODY" | json_read 'data.data.workspace.id')"
 echo "[test-api] workspace boundary"
 http_call "$BASE_URL/v1/workspaces/$WS_B" \
   -H "authorization: Bearer $API_KEY_A"
-assert_status 403 "cross-workspace access"
+assert_status 404 "non-member workspace access"
 
 echo "[test-api] create members"
+MEMBER1_INVITE_TOKEN=""
+MEMBER1_USER_ID=""
+MEMBER2_USER_ID=""
 for i in 1 2; do
   MEMBER_EMAIL="member${i}+$(date +%s)@example.com"
   http_call -X POST "$BASE_URL/v1/workspaces/$WS_A/members" \
@@ -95,6 +98,12 @@ for i in 1 2; do
     -d "{\"email\":\"$MEMBER_EMAIL\",\"role\":\"MEMBER\"}"
   assert_status 201 "create member $i"
   assert_success "create member $i"
+  if [[ "$i" == "1" ]]; then
+    MEMBER1_USER_ID="$(printf '%s' "$HTTP_BODY" | json_read 'data.data.user_id')"
+    MEMBER1_INVITE_TOKEN="$(printf '%s' "$HTTP_BODY" | json_read 'data.data.invite_token')"
+  else
+    MEMBER2_USER_ID="$(printf '%s' "$HTTP_BODY" | json_read 'data.data.user_id')"
+  fi
 done
 
 echo "[test-api] members pagination"
@@ -107,6 +116,32 @@ http_call "$BASE_URL/v1/workspaces/$WS_A/members?limit=1&cursor=$MEMBERS_CURSOR"
   -H "authorization: Bearer $API_KEY_A"
 assert_status 200 "members list page 2"
 assert_success "members list page 2"
+
+echo "[test-api] claim member invite"
+http_call -X POST "$BASE_URL/v1/auth/claim-invite" \
+  -H 'content-type: application/json' \
+  -d "{\"invite_token\":\"$MEMBER1_INVITE_TOKEN\",\"display_name\":\"Member One\"}"
+assert_status 201 "claim member invite"
+assert_success "claim member invite"
+MEMBER1_KEY="$(printf '%s' "$HTTP_BODY" | json_read 'data.data.api_key')"
+
+echo "[test-api] claim member invite twice"
+http_call -X POST "$BASE_URL/v1/auth/claim-invite" \
+  -H 'content-type: application/json' \
+  -d "{\"invite_token\":\"$MEMBER1_INVITE_TOKEN\"}"
+assert_status 409 "claim member invite twice"
+
+echo "[test-api] member key sees own workspaces"
+http_call "$BASE_URL/v1/workspaces?limit=10" \
+  -H "authorization: Bearer $MEMBER1_KEY"
+assert_status 200 "member workspaces"
+assert_success "member workspaces"
+CLAIMED_MEMBER_WORKSPACE_ID="$(printf '%s' "$HTTP_BODY" | json_read 'data.data.workspaces[0] ? data.data.workspaces[0].id : ""')"
+if [[ "$CLAIMED_MEMBER_WORKSPACE_ID" != "$WS_A" ]]; then
+  echo "[test-api] member workspaces failed: expected first workspace $WS_A got $CLAIMED_MEMBER_WORKSPACE_ID" >&2
+  echo "[test-api] response: $HTTP_BODY" >&2
+  exit 1
+fi
 
 echo "[test-api] create tasks"
 for i in 1 2; do
@@ -121,6 +156,16 @@ for i in 1 2; do
     VERSION_1="$(printf '%s' "$HTTP_BODY" | json_read 'data.data.version')"
   fi
 done
+
+echo "[test-api] create assigned task"
+http_call -X POST "$BASE_URL/v1/workspaces/$WS_A/tasks" \
+  -H "authorization: Bearer $API_KEY_A" \
+  -H 'content-type: application/json' \
+  -d "{\"title\":\"Assigned Task\",\"priority\":\"P1\",\"assignee_user_id\":\"$MEMBER1_USER_ID\"}"
+assert_status 201 "create assigned task"
+assert_success "create assigned task"
+ASSIGNED_TASK_ID="$(printf '%s' "$HTTP_BODY" | json_read 'data.data.id')"
+ASSIGNED_TASK_VERSION="$(printf '%s' "$HTTP_BODY" | json_read 'data.data.version')"
 
 echo "[test-api] optimistic concurrency success"
 http_call -X PATCH "$BASE_URL/v1/tasks/$TASK_ID" \
@@ -138,6 +183,60 @@ http_call -X PATCH "$BASE_URL/v1/tasks/$TASK_ID" \
   -H "if-match-version: $VERSION_1" \
   -d '{"status":"DONE"}'
 assert_status 409 "task update stale version"
+
+echo "[test-api] reassign assigned task"
+http_call -X PATCH "$BASE_URL/v1/tasks/$ASSIGNED_TASK_ID" \
+  -H "authorization: Bearer $API_KEY_A" \
+  -H 'content-type: application/json' \
+  -H "if-match-version: $ASSIGNED_TASK_VERSION" \
+  -d "{\"assignee_user_id\":\"$MEMBER2_USER_ID\",\"change_reason\":\"manual\"}"
+assert_status 200 "task reassign"
+assert_success "task reassign"
+REASSIGNED_TASK_VERSION="$(printf '%s' "$HTTP_BODY" | json_read 'data.data.version')"
+
+echo "[test-api] task history"
+http_call "$BASE_URL/v1/tasks/$ASSIGNED_TASK_ID/history?limit=10" \
+  -H "authorization: Bearer $API_KEY_A"
+assert_status 200 "task history"
+assert_success "task history"
+printf '%s' "$HTTP_BODY" | json_read 'data.data.history.find((entry) => entry.change_type === "ASSIGNEE_CHANGED") ? "ok" : undefined' >/dev/null
+
+echo "[test-api] create removable member task"
+http_call -X PATCH "$BASE_URL/v1/tasks/$ASSIGNED_TASK_ID" \
+  -H "authorization: Bearer $API_KEY_A" \
+  -H 'content-type: application/json' \
+  -H "if-match-version: $REASSIGNED_TASK_VERSION" \
+  -d "{\"assignee_user_id\":\"$MEMBER1_USER_ID\",\"change_reason\":\"manual\"}"
+assert_status 200 "task assign back to removable member"
+assert_success "task assign back to removable member"
+
+echo "[test-api] member removal blocked while tasks assigned"
+http_call -X DELETE "$BASE_URL/v1/workspaces/$WS_A/members/$MEMBER1_USER_ID" \
+  -H "authorization: Bearer $API_KEY_A"
+assert_status 409 "member removal blocked"
+
+echo "[test-api] remove member with reassignment"
+http_call -X DELETE "$BASE_URL/v1/workspaces/$WS_A/members/$MEMBER1_USER_ID?task_policy=reassign&reassign_to_user_id=$MEMBER2_USER_ID" \
+  -H "authorization: Bearer $API_KEY_A"
+assert_status 200 "member removal with reassignment"
+assert_success "member removal with reassignment"
+
+echo "[test-api] removed member loses workspace access"
+http_call "$BASE_URL/v1/workspaces/$WS_A" \
+  -H "authorization: Bearer $MEMBER1_KEY"
+assert_status 404 "removed member workspace access"
+
+echo "[test-api] reassigned task visible after member removal"
+http_call "$BASE_URL/v1/tasks/$ASSIGNED_TASK_ID" \
+  -H "authorization: Bearer $API_KEY_A"
+assert_status 200 "reassigned task fetch"
+assert_success "reassigned task fetch"
+FINAL_ASSIGNEE_USER_ID="$(printf '%s' "$HTTP_BODY" | json_read 'data.data.assignee_user_id')"
+if [[ "$FINAL_ASSIGNEE_USER_ID" != "$MEMBER2_USER_ID" ]]; then
+  echo "[test-api] reassigned task fetch failed: expected assignee $MEMBER2_USER_ID got $FINAL_ASSIGNEE_USER_ID" >&2
+  echo "[test-api] response: $HTTP_BODY" >&2
+  exit 1
+fi
 
 echo "[test-api] tasks pagination"
 http_call "$BASE_URL/v1/workspaces/$WS_A/tasks?limit=1" \

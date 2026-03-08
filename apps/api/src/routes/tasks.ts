@@ -58,6 +58,15 @@ type TaskRow = {
   deleted_at: string | null;
 };
 
+function parseJsonValue(raw: string | null) {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+
 export function registerTaskRoutes(app: Hono<AppEnv>) {
   app.post('/v1/workspaces/:workspaceId/tasks', async (c) => {
     const principal = c.get('principal');
@@ -320,6 +329,114 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
     }
 
     return ok(c, task);
+  });
+
+  app.get('/v1/tasks/:taskId/history', async (c) => {
+    const principal = c.get('principal');
+    if (!hasScope(principal, 'workspace:read')) {
+      return error(c, 403, 'FORBIDDEN', 'Missing workspace:read scope');
+    }
+
+    const taskId = c.req.param('taskId');
+    const task = await c.env.DB.prepare(
+      `SELECT id, workspace_id
+       FROM tasks
+       WHERE id = ?
+       LIMIT 1`
+    )
+      .bind(taskId)
+      .first<{ id: string; workspace_id: string }>();
+
+    if (!task) {
+      return error(c, 404, 'NOT_FOUND', 'Task not found');
+    }
+
+    const membership = await requireMembership(c, task.workspace_id, 'VIEWER');
+    if ('error' in membership) {
+      return membership.error;
+    }
+
+    const limit = parseLimit(c.req.query('limit'), 50, 100);
+    const cursor = decodeCursor(c.req.query('cursor'));
+    const whereClauses = ['th.task_id = ?'];
+    const params: (string | number)[] = [taskId];
+
+    if (cursor) {
+      whereClauses.push('(th.created_at < ? OR (th.created_at = ? AND th.id < ?))');
+      params.push(cursor.ts, cursor.ts, cursor.id);
+    }
+
+    params.push(limit + 1);
+
+    const rows = await c.env.DB.prepare(
+      `SELECT
+         th.id,
+         th.workspace_id,
+         th.task_id,
+         th.actor_user_id,
+         u.email AS actor_email,
+         u.display_name AS actor_display_name,
+         th.change_type,
+         th.change_reason,
+         th.from_value_json,
+         th.to_value_json,
+         th.metadata_json,
+         th.created_at
+       FROM task_history th
+       LEFT JOIN users u ON u.id = th.actor_user_id
+       WHERE ${whereClauses.join(' AND ')}
+       ORDER BY th.created_at DESC, th.id DESC
+       LIMIT ?`
+    )
+      .bind(...params)
+      .all<{
+        id: string;
+        workspace_id: string;
+        task_id: string;
+        actor_user_id: string | null;
+        actor_email: string | null;
+        actor_display_name: string | null;
+        change_type: string;
+        change_reason: string;
+        from_value_json: string | null;
+        to_value_json: string | null;
+        metadata_json: string | null;
+        created_at: string;
+      }>();
+
+    const entries = (rows.results ?? []).map((row) => ({
+      id: row.id,
+      workspace_id: row.workspace_id,
+      task_id: row.task_id,
+      actor: row.actor_user_id
+        ? {
+            user_id: row.actor_user_id,
+            email: row.actor_email,
+            display_name: row.actor_display_name,
+          }
+        : null,
+      change_type: row.change_type,
+      change_reason: row.change_reason,
+      from_value: parseJsonValue(row.from_value_json),
+      to_value: parseJsonValue(row.to_value_json),
+      metadata: parseJsonValue(row.metadata_json),
+      created_at: row.created_at,
+    }));
+
+    const hasMore = entries.length > limit;
+    const page = hasMore ? entries.slice(0, limit) : entries;
+    const last = page[page.length - 1];
+    const nextCursor = hasMore && last ? encodeCursor({ ts: last.created_at, id: last.id }) : null;
+
+    return ok(c, {
+      task_id: taskId,
+      history: page,
+      pagination: {
+        limit,
+        next_cursor: nextCursor,
+        has_more: hasMore,
+      },
+    });
   });
 
   app.patch('/v1/tasks/:taskId', async (c) => {

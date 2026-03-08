@@ -4,6 +4,7 @@ compatibility_date = "2026-02-05"
 
 [vars]
 ENVIRONMENT = "prod"
+APP_BASE_URL = "https://todoless.dev"
 
 [[d1_databases]]
 binding = "DB"

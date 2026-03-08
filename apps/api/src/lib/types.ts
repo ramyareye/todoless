@@ -20,6 +20,10 @@ export interface EnvBindings {
   DB: D1Database;
   ENVIRONMENT?: string;
   API_KEY_PEPPER?: string;
+  APP_BASE_URL?: string;
+  RESEND_API_KEY?: string;
+  RESEND_FROM_EMAIL?: string;
+  RESEND_REPLY_TO_EMAIL?: string;
 }
 
 export interface Principal {

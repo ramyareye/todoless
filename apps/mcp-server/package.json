@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "deploy": "wrangler deploy",
     "start": "node src/server.mjs",
     "validate": "node scripts/validate.mjs",
     "dev:http": "wrangler dev",

@@ -62,13 +62,6 @@ function resolveUpstreamApiKey(request, env) {
     };
   }
 
-  if (env.TODOLESS_API_KEY) {
-    return {
-      apiKey: env.TODOLESS_API_KEY,
-      source: 'env',
-    };
-  }
-
   return {
     apiKey: null,
     source: null,
@@ -117,7 +110,6 @@ export default {
         requires_mcp_auth_token: Boolean(env.MCP_AUTH_TOKEN),
         accepts_bearer_as_api_key: !Boolean(env.MCP_AUTH_TOKEN),
         accepts_request_api_key_header: true,
-        has_fallback_api_key: Boolean(env.TODOLESS_API_KEY),
         has_service_binding: Boolean(serviceBinding),
         upstream,
       });
@@ -143,8 +135,8 @@ export default {
           ok: false,
           error:
             env.MCP_AUTH_TOKEN
-              ? 'Missing Todoless API key. Send x-todoless-api-key or configure TODOLESS_API_KEY fallback.'
-              : 'Missing Todoless API key. Send Authorization: Bearer <TODOLESS_API_KEY> or configure TODOLESS_API_KEY fallback.',
+              ? 'Missing Todoless API key. Send x-todoless-api-key.'
+              : 'Missing Todoless API key. Send Authorization: Bearer <TODOLESS_API_KEY>.',
         },
         401,
         { 'www-authenticate': 'Bearer' }

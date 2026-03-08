@@ -4,11 +4,12 @@ Run with local dev server active (`npm run dev`).
 
 ## 1. Baseline
 - [ ] `npm run typecheck` passes
-- [ ] `npm run db:migrate:local` applies `0001` and `0002`
+- [ ] `npm run db:migrate:local` applies `0001` through `0004`
 - [ ] `npm run smoke` finishes successfully
 
 ## 2. Auth and identity
 - [ ] `POST /v1/auth/register` returns user, workspace, one-time API key
+- [ ] `POST /v1/auth/claim-invite` redeems a one-time invite token for a personal API key
 - [ ] `GET /v1/me` works with key
 - [ ] Invalid/missing bearer token returns `401`
 - [ ] Revoked key returns `401`
@@ -17,6 +18,9 @@ Run with local dev server active (`npm run dev`).
 - [ ] `GET /v1/workspaces` returns user workspaces
 - [ ] `POST /v1/workspaces` creates workspace
 - [ ] `POST /v1/workspaces/:id/members` adds member
+- [ ] Member add response includes one-time `invite_token`
+- [ ] `DELETE /v1/workspaces/:id/members/:userId` blocks removal while tasks are assigned unless a task policy is provided
+- [ ] Member removal can unassign or reassign active tasks
 - [ ] ADMIN cannot assign role higher than self
 - [ ] OWNER role cannot be modified
 
@@ -37,6 +41,7 @@ Run with local dev server active (`npm run dev`).
 - [ ] Create task
 - [ ] List tasks with filters (`status`, `priority`, `project_id`, `assignee_id`, `due_from`, `due_to`)
 - [ ] Get task by id
+- [ ] Get task history by id
 - [ ] Patch task with version check succeeds
 - [ ] Patch task with stale version returns `409 VERSION_CONFLICT`
 - [ ] Delete task (soft)
