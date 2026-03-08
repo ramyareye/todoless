@@ -4,7 +4,8 @@ import { createTodolessMcpServer, DEFAULT_API_BASE_URL } from './mcp-server.mjs'
 const CORS_HEADERS = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET, POST, DELETE, OPTIONS',
-  'access-control-allow-headers': 'content-type, authorization, mcp-session-id, mcp-protocol-version, last-event-id',
+  'access-control-allow-headers':
+    'content-type, authorization, x-todoless-api-key, mcp-session-id, mcp-protocol-version, last-event-id',
   'access-control-expose-headers': 'mcp-session-id, mcp-protocol-version',
 };
 
@@ -35,6 +36,43 @@ function bearerToken(request) {
   const header = request.headers.get('authorization') || '';
   const match = header.match(/^Bearer\s+(.+)$/i);
   return match ? match[1] : null;
+}
+
+function requestApiKeyHeader(request) {
+  const value = request.headers.get('x-todoless-api-key');
+  if (!value) return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function resolveUpstreamApiKey(request, env) {
+  const headerApiKey = requestApiKeyHeader(request);
+  if (headerApiKey) {
+    return {
+      apiKey: headerApiKey,
+      source: 'x-todoless-api-key',
+    };
+  }
+
+  const bearer = bearerToken(request);
+  if (!env.MCP_AUTH_TOKEN && bearer) {
+    return {
+      apiKey: bearer,
+      source: 'authorization',
+    };
+  }
+
+  if (env.TODOLESS_API_KEY) {
+    return {
+      apiKey: env.TODOLESS_API_KEY,
+      source: 'env',
+    };
+  }
+
+  return {
+    apiKey: null,
+    source: null,
+  };
 }
 
 export default {
@@ -76,7 +114,10 @@ export default {
         service: 'todoless-mcp-http',
         timestamp: new Date().toISOString(),
         api_base_url: apiBaseUrl,
-        has_api_key: Boolean(env.TODOLESS_API_KEY),
+        requires_mcp_auth_token: Boolean(env.MCP_AUTH_TOKEN),
+        accepts_bearer_as_api_key: !Boolean(env.MCP_AUTH_TOKEN),
+        accepts_request_api_key_header: true,
+        has_fallback_api_key: Boolean(env.TODOLESS_API_KEY),
         has_service_binding: Boolean(serviceBinding),
         upstream,
       });
@@ -95,14 +136,25 @@ export default {
       }
     }
 
-    if (!env.TODOLESS_API_KEY) {
-      return jsonResponse({ ok: false, error: 'TODOLESS_API_KEY is not configured' }, 500);
+    const upstreamAuth = resolveUpstreamApiKey(request, env);
+    if (!upstreamAuth.apiKey) {
+      return jsonResponse(
+        {
+          ok: false,
+          error:
+            env.MCP_AUTH_TOKEN
+              ? 'Missing Todoless API key. Send x-todoless-api-key or configure TODOLESS_API_KEY fallback.'
+              : 'Missing Todoless API key. Send Authorization: Bearer <TODOLESS_API_KEY> or configure TODOLESS_API_KEY fallback.',
+        },
+        401,
+        { 'www-authenticate': 'Bearer' }
+      );
     }
 
     const apiBaseUrl = (env.TODOLESS_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/+$/, '');
     const server = createTodolessMcpServer({
       apiBaseUrl,
-      apiKey: env.TODOLESS_API_KEY,
+      apiKey: upstreamAuth.apiKey,
       fetchFn,
     });
 
