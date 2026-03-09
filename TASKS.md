@@ -23,6 +23,7 @@
 ## Hardening
 - [x] Add CI workflow (`typecheck` + tests)
 - [x] Add `LICENSE` and `TRADEMARKS.md`
+- [x] Require email verification before issuing direct-registration personal API keys
 
 ## Product Idea: Timeline + Change History
 - [x] Add `task_history` / `project_history` events table (status, priority, due date, assignee changes)

@@ -69,8 +69,16 @@ http_call -X POST "$BASE_URL/v1/auth/register" \
   -d "{\"email\":\"$EMAIL_A\",\"workspace_name\":\"Suite A\"}"
 assert_status 201 "register A"
 assert_success "register A"
-API_KEY_A="$(printf '%s' "$HTTP_BODY" | json_read 'data.data.api_key')"
 WS_A="$(printf '%s' "$HTTP_BODY" | json_read 'data.data.workspace.id')"
+VERIFY_TOKEN_A="$(printf '%s' "$HTTP_BODY" | json_read 'data.data.verification_token')"
+
+echo "[test-api] verify email A"
+http_call -X POST "$BASE_URL/v1/auth/verify-email" \
+  -H 'content-type: application/json' \
+  -d "{\"verification_token\":\"$VERIFY_TOKEN_A\"}"
+assert_status 201 "verify email A"
+assert_success "verify email A"
+API_KEY_A="$(printf '%s' "$HTTP_BODY" | json_read 'data.data.api_key')"
 
 EMAIL_B="suite-b+$(date +%s)@example.com"
 echo "[test-api] register B"

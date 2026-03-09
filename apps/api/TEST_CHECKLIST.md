@@ -8,7 +8,8 @@ Run with local dev server active (`npm run dev`).
 - [ ] `npm run smoke` finishes successfully
 
 ## 2. Auth and identity
-- [ ] `POST /v1/auth/register` returns user, workspace, one-time API key
+- [ ] `POST /v1/auth/register` returns user, workspace, and pending verification details
+- [ ] `POST /v1/auth/verify-email` redeems a one-time verification token for a personal API key
 - [ ] `POST /v1/auth/claim-invite` redeems a one-time invite token for a personal API key
 - [ ] `GET /v1/me` works with key and returns nested `user`
 - [ ] Invalid/missing bearer token returns `401`

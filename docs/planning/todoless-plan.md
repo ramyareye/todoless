@@ -449,8 +449,9 @@ model WorkspaceEntitlement {
 
 Auth & keys:
 - `POST /v1/auth/register`
-- `POST /v1/auth/login`
-- `POST /v1/auth/refresh`
+- `POST /v1/auth/verify-email`
+- `POST /v1/auth/login` (optional later if sessions are added)
+- `POST /v1/auth/refresh` (optional later if sessions are added)
 - `POST /v1/workspaces/{workspaceId}/api-keys`
 - `POST /v1/api-keys/{apiKeyId}/rotate`
 - `DELETE /v1/api-keys/{apiKeyId}`
@@ -853,4 +854,3 @@ Start with a clean production core while preserving your existing prototype as a
 2. Scaffold `apps/api` Worker + Hono + Postgres schema from this plan.
 3. Implement auth + workspace + membership + API keys first.
 4. Add tasks + sync + webhook pipeline in that order.
-

@@ -13,6 +13,7 @@ Worker-first API scaffold for the multi-tenant headless Todoless platform.
 ## Endpoints
 - `GET /v1/health`
 - `POST /v1/auth/register`
+- `POST /v1/auth/verify-email`
 - `POST /v1/auth/claim-invite`
 - `GET /v1/me`
 - `GET /v1/workspaces`
@@ -81,7 +82,19 @@ curl -X POST http://localhost:8787/v1/auth/register \
   -d '{"email":"founder@example.com","workspace_name":"Acme Ops"}'
 ```
 
-The response returns a personal API key once. Persist it securely. That key is user-based, so `/v1/workspaces` reflects the workspaces where that user has membership.
+The register response creates the user and workspace, but does not return an active personal API key yet. Direct registrations must verify email first.
+
+In local/dev (`ENVIRONMENT != prod`), the response also includes a one-time `verification_token` and `verification_url` to keep tests and CLI flows automation-friendly.
+
+Redeem the verification token to receive the personal API key once:
+
+```bash
+curl -s -X POST "http://localhost:8787/v1/auth/verify-email" \
+  -H "content-type: application/json" \
+  -d '{"verification_token":"<verification_token>"}'
+```
+
+The verification response returns the personal API key once. That key is user-based, so `/v1/workspaces` reflects the workspaces where that user has membership.
 
 ## Current principal
 `GET /v1/me` returns the authenticated principal in this shape:
@@ -121,11 +134,13 @@ Optional env vars:
 - `APP_BASE_URL`
 
 Behavior:
-- `POST /v1/auth/register` queues a welcome email when Resend is configured.
+- `POST /v1/auth/register` queues an email-verification email when Resend is configured.
+- `POST /v1/auth/verify-email` reveals the first personal API key and queues a welcome email.
 - `POST /v1/workspaces/:workspaceId/members` queues an invite email when Resend is configured.
+- `GET /verify-email?token=...` serves a basic verification page that redeems the token and shows the personal API key once.
 - `GET /accept-invite?token=...` serves a basic accept-invite page that redeems the token and shows the personal API key once.
 - If `APP_BASE_URL` is set, email links point there.
-- If `APP_BASE_URL` is not set, invite links fall back to the API-hosted accept page.
+- If `APP_BASE_URL` is not set, verification and invite links fall back to API-hosted pages.
 
 ## Membership model
 - Members are added to a workspace, not directly to a project.
@@ -185,7 +200,11 @@ Or run manually:
 Set common vars:
 ```bash
 BASE_URL="http://localhost:8787"
-API_KEY="<paste_api_key_from_register>"
+VERIFY_TOKEN="<verification_token_from_register>"
+VERIFY="$(curl -s -X POST "$BASE_URL/v1/auth/verify-email" \
+  -H "content-type: application/json" \
+  -d "{\"verification_token\":\"$VERIFY_TOKEN\"}")"
+API_KEY="<paste_api_key_from_verify_email>"
 WORKSPACE_ID="<workspace_id_from_register>"
 ```
 
@@ -249,10 +268,12 @@ curl -s -X POST "$BASE_URL/v1/tasks/$TASK_ID/restore" \
 ## Security notes
 - API keys are never stored plaintext.
 - The `API_KEY_PEPPER` secret is mandatory.
+- Direct registrations must verify email before any personal API key can be used.
 - Personal API keys are user-based (`workspace_id = NULL`) and can access any workspace where the user has membership.
 - Workspace-scoped API keys can still be created via `POST /v1/workspaces/:workspaceId/api-keys` for restricted automation.
 - Workspace authorization is enforced by both scopes and RBAC role checks.
 - `POST /v1/auth/register` is rate-limited and returns `429 RATE_LIMITED` when exceeded.
+- `POST /v1/auth/verify-email` returns `409` when the token is expired or already used.
 - `POST /v1/auth/claim-invite` returns `409` when the invite token is expired, already claimed, or no longer valid.
 - `DELETE /v1/workspaces/:workspaceId/members/:userId` returns `409 ASSIGNED_TASKS_EXIST` when the removed member still has active tasks and no reassignment policy is provided.
 - JSON endpoints require `content-type: application/json` and return `415 INVALID_CONTENT_TYPE` otherwise.

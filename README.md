@@ -42,9 +42,21 @@ REGISTER="$(curl -sS -X POST "$BASE_URL/v1/auth/register" \
   -H 'content-type: application/json' \
   -d "{\"email\":\"$EMAIL\",\"workspace_name\":\"Todoless MCP\"}")"
 
-OWNER_KEY="$(printf '%s' "$REGISTER" | bun -e "const fs=require('fs');const d=JSON.parse(fs.readFileSync(0,'utf8'));if(!d.success){console.error(JSON.stringify(d));process.exit(1)}process.stdout.write(d.data.api_key)")"
 WORKSPACE_ID="$(printf '%s' "$REGISTER" | bun -e "const fs=require('fs');const d=JSON.parse(fs.readFileSync(0,'utf8'));if(!d.success){console.error(JSON.stringify(d));process.exit(1)}process.stdout.write(d.data.workspace.id)")"
-PERSONAL_KEY="$OWNER_KEY"
+
+echo "Registration created workspace_id=$WORKSPACE_ID"
+echo "Verify the email you just received, then copy the personal API key shown by the verification page."
+echo "Set PERSONAL_KEY manually before continuing."
+exit 0
+```
+
+Then continue:
+
+```bash
+BASE_URL="https://todoless.dev"
+REPO_DIR="$PWD"
+WORKSPACE_ID="<workspace_id_from_register>"
+PERSONAL_KEY="<personal_api_key_from_verify_email_page>"
 
 CONFIG="$HOME/.codex/config.toml"
 mkdir -p "$(dirname "$CONFIG")"

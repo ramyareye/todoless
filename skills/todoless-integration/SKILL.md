@@ -41,14 +41,16 @@ Do not use MCP for registration or invite claim bootstrap. Use the API for that 
 
 Canonical flow:
 
-1. Register or claim invite through the API.
-2. Receive a personal API key.
-3. Use that key for API calls.
-4. Use that same key for MCP.
+1. Register through the API or claim an invite.
+2. Direct registrations must verify email through the API before the first personal API key is issued.
+3. Invited users receive a personal API key when they claim the invite.
+4. Use the personal API key for API calls.
+5. Use that same key for MCP.
 
 Important:
 
-- `POST /v1/auth/register` returns the personal key once
+- `POST /v1/auth/register` returns a pending-verification response, not an active key
+- `POST /v1/auth/verify-email` returns the personal key once
 - `POST /v1/auth/claim-invite` returns the personal key once
 - hosted MCP is per-user by bearer token
 - local STDIO MCP uses `TODOLESS_API_KEY`
@@ -77,4 +79,5 @@ Read [references/setup-and-flows.md](./references/setup-and-flows.md) when you n
 - `GET /v1/me` returns `data.user`, `data.scopes`, `data.api_key_id`
 - members are added to workspaces, not directly to projects
 - tasks can be reassigned to any current workspace member
+- direct registration links use `https://todoless.dev/verify-email?token=...`
 - invite links use `https://todoless.dev/accept-invite?token=...`

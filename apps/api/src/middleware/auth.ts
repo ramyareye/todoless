@@ -29,7 +29,8 @@ export const authMiddleware = createMiddleware<AppEnv>(async (c, next) => {
       ak.revoked_at,
       ak.expires_at,
       u.id AS user_id,
-      u.email
+      u.email,
+      u.email_verified_at
     FROM api_keys ak
     JOIN users u ON u.id = ak.created_by_user_id
     WHERE ak.key_prefix = ?
@@ -45,6 +46,7 @@ export const authMiddleware = createMiddleware<AppEnv>(async (c, next) => {
       expires_at: string | null;
       user_id: string;
       email: string;
+      email_verified_at: string | null;
     }>();
 
   if (!keyRecord || keyRecord.revoked_at) {
@@ -58,6 +60,10 @@ export const authMiddleware = createMiddleware<AppEnv>(async (c, next) => {
   const incomingHash = await hashApiKey(token, pepper);
   if (incomingHash !== keyRecord.key_hash) {
     return error(c, 401, 'UNAUTHORIZED', 'Invalid API key');
+  }
+
+  if (!keyRecord.email_verified_at) {
+    return error(c, 403, 'EMAIL_NOT_VERIFIED', 'Verify your email before using this API key');
   }
 
   let scopes: string[] = [];

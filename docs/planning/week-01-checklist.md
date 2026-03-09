@@ -21,7 +21,8 @@ Stabilize local development for `apps/api` so setup works from a clean clone.
 - [ ] Run local migrations successfully
 - [ ] Start worker locally
 - [ ] Verify `GET /v1/health`
-- [ ] Verify `POST /v1/auth/register` returns user/workspace/api key
+- [ ] Verify `POST /v1/auth/register` returns user/workspace plus pending verification details
+- [ ] Verify `POST /v1/auth/verify-email` returns the first personal API key
 - [ ] Update docs if setup commands changed
 - [ ] Commit changes with clear message
 
@@ -49,9 +50,16 @@ curl -s -X POST http://127.0.0.1:8787/v1/auth/register \
   -d '{"email":"founder@example.com","workspace_name":"Acme Ops"}'
 ```
 
+Verify-email smoke test:
+```bash
+curl -s -X POST http://127.0.0.1:8787/v1/auth/verify-email \
+  -H "content-type: application/json" \
+  -d '{"verification_token":"<verification_token_from_register>"}'
+```
+
 ## Definition of Done
 - New machine/fresh clone setup takes <= 20 minutes.
-- Health and register endpoints both work locally.
+- Health, register, and verify-email endpoints all work locally.
 - No manual undocumented setup steps remain.
 - `README.md` and `apps/api/README.md` are accurate.
 

@@ -46,8 +46,15 @@ register_response="$(request -X POST "$BASE_URL/v1/auth/register" \
   -d "{\"email\":\"$EMAIL\",\"workspace_name\":\"Acme Ops\"}")"
 require_success "$register_response" "register"
 
-API_KEY="$(printf '%s' "$register_response" | json_read 'data.data.api_key')"
 WORKSPACE_ID="$(printf '%s' "$register_response" | json_read 'data.data.workspace.id')"
+VERIFY_TOKEN="$(printf '%s' "$register_response" | json_read 'data.data.verification_token')"
+
+echo "[smoke] verify email"
+verify_response="$(request -X POST "$BASE_URL/v1/auth/verify-email" \
+  -H 'content-type: application/json' \
+  -d "{\"verification_token\":\"$VERIFY_TOKEN\"}")"
+require_success "$verify_response" "verify email"
+API_KEY="$(printf '%s' "$verify_response" | json_read 'data.data.api_key')"
 
 echo "[smoke] create project"
 project_response="$(request -X POST "$BASE_URL/v1/workspaces/$WORKSPACE_ID/projects" \
