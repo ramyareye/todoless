@@ -9,6 +9,13 @@
     "typecheck": "tsc --noEmit",
     "smoke": "bash scripts/smoke.sh",
     "test:api": "bash scripts/test_api.sh",
+    "test:security": "bun test scripts/security.test.ts",
+    "test:project-access": "bun test scripts/project-access.test.ts",
+    "test:key-recovery": "bun test scripts/key-recovery.test.ts",
+    "test:protection": "bun test scripts/usage-protection.test.ts",
+    "test:local": "bun scripts/test-local.ts",
+    "build:release": "bun scripts/build-release.ts",
+    "test:recovery": "bun scripts/validate-recovery.ts",
     "db:migrate:local": "wrangler d1 migrations apply todoless --local",
     "db:migrate:remote": "wrangler d1 migrations apply todoless --remote"
   },

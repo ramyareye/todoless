@@ -2,6 +2,8 @@ import type { Hono } from 'hono';
 import { z } from 'zod';
 import type { AppEnv, Scope } from '../lib/types';
 import { defaultWorkspaceName, makeWorkspaceSlug, newId } from '../lib/ids';
+import { credentialPageNonce } from '../lib/credential-page';
+import { exposesDevelopmentTokens } from '../lib/development-tokens';
 import { error, jsonBody, ok, validationError } from '../lib/response';
 import { hashApiKey, issueApiKey } from '../services/api-keys';
 import { writeAudit } from '../services/audit';
@@ -15,7 +17,7 @@ import {
   queueEmailVerificationEmail,
   queueWelcomeEmail,
 } from '../services/email';
-import { extractInvitePrefix } from '../services/invites';
+import { extractInvitePrefix, hashInviteToken } from '../services/invites';
 import { enforceRegisterRateLimit } from '../services/rate-limit';
 
 const registerSchema = z.object({
@@ -42,10 +44,6 @@ const PERSONAL_API_KEY_SCOPES: Scope[] = [
   'apikeys:write',
 ];
 
-function shouldExposeVerificationToken(c: { env: AppEnv['Bindings'] }) {
-  return c.env.ENVIRONMENT !== 'prod';
-}
-
 function renderVerificationPendingResponse(
   c: Parameters<typeof ok>[0],
   args: {
@@ -68,7 +66,7 @@ function renderVerificationPendingResponse(
   status: 200 | 201
 ) {
   const verificationUrl = buildVerifyEmailUrl(c, args.verification.raw);
-  const exposeToken = shouldExposeVerificationToken(c);
+  const exposeToken = exposesDevelopmentTokens(c.env);
 
   return ok(
     c,
@@ -98,15 +96,21 @@ async function findOwnedWorkspace(db: D1Database, userId: string) {
 }
 
 export function registerAuthRoutes(app: Hono<AppEnv>) {
+  app.use('/v1/auth/*', async (c, next) => {
+    c.header('cache-control', 'no-store');
+    c.header('referrer-policy', 'no-referrer');
+    await next();
+  });
+
   app.get('/accept-invite', (c) => {
-    const token = c.req.query('token') ?? '';
+    const nonce = credentialPageNonce(c);
     return c.html(`<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Accept Todoless Invitation</title>
-    <style>
+    <style nonce="${nonce}">
       body { font-family: ui-sans-serif, system-ui, sans-serif; background: #f7f7f5; color: #161616; margin: 0; }
       main { max-width: 640px; margin: 48px auto; padding: 24px; }
       .card { background: #fff; border: 1px solid #ddd; border-radius: 16px; padding: 24px; box-shadow: 0 8px 24px rgba(0,0,0,0.06); }
@@ -129,21 +133,28 @@ export function registerAuthRoutes(app: Hono<AppEnv>) {
         <form id="claim-form">
           <label for="display_name">Display name</label>
           <input id="display_name" name="display_name" type="text" maxlength="80" placeholder="Jane Doe" />
-          <button type="submit">Accept invitation</button>
+          <button id="claim-button" type="submit">Accept invitation</button>
         </form>
         <p id="status" class="muted"></p>
-        <div id="result"></div>
+        <div id="result" hidden>
+          <p><strong>Workspace:</strong> <span id="workspace-name"></span></p>
+          <p><strong>User:</strong> <span id="user-email"></span></p>
+          <pre id="api-key"></pre>
+        </div>
       </div>
     </main>
-    <script>
-      const inviteToken = ${JSON.stringify(token)};
+    <script nonce="${nonce}">
+      const inviteToken = new URLSearchParams(window.location.search).get('token') || '';
       const form = document.getElementById('claim-form');
+      const button = document.getElementById('claim-button');
       const statusEl = document.getElementById('status');
       const resultEl = document.getElementById('result');
       form.addEventListener('submit', async (event) => {
         event.preventDefault();
+        if (button.disabled) return;
+        button.disabled = true;
         statusEl.textContent = 'Claiming invitation...';
-        resultEl.innerHTML = '';
+        resultEl.hidden = true;
         const displayName = document.getElementById('display_name').value.trim();
         const response = await fetch('/v1/auth/claim-invite', {
           method: 'POST',
@@ -152,19 +163,20 @@ export function registerAuthRoutes(app: Hono<AppEnv>) {
             invite_token: inviteToken,
             display_name: displayName || undefined
           })
-        });
-        const payload = await response.json().catch(() => null);
+        }).catch(() => null);
+        const payload = response && await response.json().catch(() => null);
         if (!payload || payload.success !== true) {
           statusEl.textContent = payload?.error?.message || 'Invitation claim failed';
           statusEl.className = 'error';
+          button.disabled = false;
           return;
         }
         statusEl.textContent = 'Invitation accepted. This API key is shown once.';
         statusEl.className = 'muted';
-        resultEl.innerHTML =
-          '<p><strong>Workspace:</strong> ' + payload.data.workspace.name + '</p>' +
-          '<p><strong>User:</strong> ' + payload.data.user.email + '</p>' +
-          '<pre>' + payload.data.api_key + '</pre>';
+        document.getElementById('workspace-name').textContent = payload.data.workspace.name;
+        document.getElementById('user-email').textContent = payload.data.user.email;
+        document.getElementById('api-key').textContent = payload.data.api_key;
+        resultEl.hidden = false;
       });
     </script>
   </body>
@@ -172,14 +184,14 @@ export function registerAuthRoutes(app: Hono<AppEnv>) {
   });
 
   app.get('/verify-email', (c) => {
-    const token = c.req.query('token') ?? '';
+    const nonce = credentialPageNonce(c);
     return c.html(`<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Verify Todoless Email</title>
-    <style>
+    <style nonce="${nonce}">
       body { font-family: ui-sans-serif, system-ui, sans-serif; background: #f7f7f5; color: #161616; margin: 0; }
       main { max-width: 640px; margin: 48px auto; padding: 24px; }
       .card { background: #fff; border: 1px solid #ddd; border-radius: 16px; padding: 24px; box-shadow: 0 8px 24px rgba(0,0,0,0.06); }
@@ -198,26 +210,31 @@ export function registerAuthRoutes(app: Hono<AppEnv>) {
         <p>Verify your email to activate your Todoless account and reveal your personal API key.</p>
         <button id="verify-button" type="button">Verify email</button>
         <p id="status" class="muted"></p>
-        <div id="result"></div>
+        <div id="result" hidden>
+          <p><strong>Workspace:</strong> <span id="workspace-name"></span></p>
+          <p><strong>User:</strong> <span id="user-email"></span></p>
+          <pre id="api-key"></pre>
+        </div>
       </div>
     </main>
-    <script>
-      const verificationToken = ${JSON.stringify(token)};
+    <script nonce="${nonce}">
+      const verificationToken = new URLSearchParams(window.location.search).get('token') || '';
       const button = document.getElementById('verify-button');
       const statusEl = document.getElementById('status');
       const resultEl = document.getElementById('result');
       button.addEventListener('click', async () => {
+        if (button.disabled) return;
         button.disabled = true;
         statusEl.textContent = 'Verifying email...';
-        resultEl.innerHTML = '';
+        resultEl.hidden = true;
         const response = await fetch('/v1/auth/verify-email', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
             verification_token: verificationToken
           })
-        });
-        const payload = await response.json().catch(() => null);
+        }).catch(() => null);
+        const payload = response && await response.json().catch(() => null);
         if (!payload || payload.success !== true) {
           statusEl.textContent = payload?.error?.message || 'Email verification failed';
           statusEl.className = 'error';
@@ -226,10 +243,10 @@ export function registerAuthRoutes(app: Hono<AppEnv>) {
         }
         statusEl.textContent = 'Email verified. This API key is shown once.';
         statusEl.className = 'muted';
-        resultEl.innerHTML =
-          '<p><strong>Workspace:</strong> ' + payload.data.workspace.name + '</p>' +
-          '<p><strong>User:</strong> ' + payload.data.user.email + '</p>' +
-          '<pre>' + payload.data.api_key + '</pre>';
+        document.getElementById('workspace-name').textContent = payload.data.workspace.name;
+        document.getElementById('user-email').textContent = payload.data.user.email;
+        document.getElementById('api-key').textContent = payload.data.api_key;
+        resultEl.hidden = false;
       });
     </script>
   </body>
@@ -258,7 +275,7 @@ export function registerAuthRoutes(app: Hono<AppEnv>) {
       });
     }
 
-    if (c.env.ENVIRONMENT === 'prod' && !isEmailDeliveryConfigured(c.env)) {
+    if (!exposesDevelopmentTokens(c.env) && !isEmailDeliveryConfigured(c.env)) {
       return error(
         c,
         500,
@@ -485,41 +502,57 @@ export function registerAuthRoutes(app: Hono<AppEnv>) {
       scopes: PERSONAL_API_KEY_SCOPES,
     });
 
-    await c.env.DB.batch([
+    // Recheck the token and unverified identity inside the write transaction.
+    // Only a request that inserts its unique key may verify, consume, or audit.
+    const [issuedKey] = await c.env.DB.batch([
       c.env.DB.prepare(
         `INSERT INTO api_keys
          (id, workspace_id, created_by_user_id, name, key_prefix, key_hash, scopes_json, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+         SELECT ?, NULL, evt.user_id, ?, ?, ?, ?, NULL
+         FROM email_verification_tokens evt
+         JOIN users u ON u.id = evt.user_id
+         JOIN workspaces w ON w.id = ? AND w.created_by_user_id = u.id
+         WHERE evt.id = ? AND evt.token_hash = ? AND evt.consumed_at IS NULL
+           AND julianday(evt.expires_at) > julianday('now') AND u.email_verified_at IS NULL`
       ).bind(
         apiKey.id,
-        null,
-        record.user_id,
         apiKey.name,
         apiKey.keyPrefix,
         apiKey.keyHash,
         JSON.stringify(apiKey.scopes),
-        null
+        workspace.id,
+        record.id,
+        incomingHash
       ),
       c.env.DB.prepare(
         `UPDATE users
          SET email_verified_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?`
-      ).bind(record.user_id),
+         WHERE id = ? AND EXISTS (SELECT 1 FROM api_keys WHERE id = ?)`
+      ).bind(record.user_id, apiKey.id),
       c.env.DB.prepare(
         `UPDATE email_verification_tokens
          SET consumed_at = CURRENT_TIMESTAMP
-         WHERE user_id = ? AND consumed_at IS NULL`
-      ).bind(record.user_id),
+         WHERE user_id = ? AND consumed_at IS NULL
+           AND EXISTS (SELECT 1 FROM api_keys WHERE id = ?)`
+      ).bind(record.user_id, apiKey.id),
+      c.env.DB.prepare(
+        `INSERT INTO audit_logs
+         (id, workspace_id, actor_user_id, action, entity_type, entity_id, metadata_json)
+         SELECT ?, ?, ?, 'VERIFY_EMAIL', 'user', ?, ?
+         WHERE EXISTS (SELECT 1 FROM api_keys WHERE id = ?)`
+      ).bind(
+        newId('audit_'),
+        workspace.id,
+        record.user_id,
+        record.user_id,
+        JSON.stringify({ key_prefix: apiKey.keyPrefix }),
+        apiKey.id
+      ),
     ]);
 
-    await writeAudit(c.env.DB, {
-      workspaceId: workspace.id,
-      actorUserId: record.user_id,
-      action: 'VERIFY_EMAIL',
-      entityType: 'user',
-      entityId: record.user_id,
-      metadata: { key_prefix: apiKey.keyPrefix },
-    });
+    if (issuedKey.meta.changes !== 1) {
+      return error(c, 409, 'EMAIL_VERIFICATION_INVALID', 'Verification token or user is no longer eligible');
+    }
 
     queueWelcomeEmail(c, {
       email: record.email,
@@ -608,7 +641,7 @@ export function registerAuthRoutes(app: Hono<AppEnv>) {
       return error(c, 500, 'SERVER_MISCONFIGURED', 'API_KEY_PEPPER is required');
     }
 
-    const incomingHash = await hashApiKey(payload.invite_token.trim(), c.env.API_KEY_PEPPER);
+    const incomingHash = await hashInviteToken(payload.invite_token.trim(), c.env.API_KEY_PEPPER);
     if (incomingHash !== invite.token_hash) {
       return error(c, 401, 'INVALID_INVITE_TOKEN', 'Invalid invite token');
     }
@@ -642,42 +675,58 @@ export function registerAuthRoutes(app: Hono<AppEnv>) {
       scopes: PERSONAL_API_KEY_SCOPES,
     });
 
-    await c.env.DB.batch([
+    // The insert rechecks invitation validity inside the same transaction as
+    // consumption. Only the request that inserts its unique key may mutate the
+    // user or write an audit event; concurrent replays insert zero rows.
+    const [issuedKey] = await c.env.DB.batch([
       c.env.DB.prepare(
         `INSERT INTO api_keys
          (id, workspace_id, created_by_user_id, name, key_prefix, key_hash, scopes_json, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+         SELECT ?, NULL, mi.user_id, ?, ?, ?, ?, NULL
+         FROM member_invites mi
+         JOIN users u ON u.id = mi.user_id AND u.email = mi.email
+         JOIN workspaces w ON w.id = mi.workspace_id
+         JOIN memberships m ON m.workspace_id = mi.workspace_id AND m.user_id = mi.user_id
+         WHERE mi.id = ? AND mi.token_hash = ? AND mi.claimed_at IS NULL
+           AND julianday(mi.expires_at) > julianday('now') AND w.deleted_at IS NULL`
       ).bind(
         apiKey.id,
-        null,
-        invite.user_id,
         apiKey.name,
         apiKey.keyPrefix,
         apiKey.keyHash,
         JSON.stringify(apiKey.scopes),
-        null
+        invite.id,
+        incomingHash
       ),
       c.env.DB.prepare(
         `UPDATE member_invites
          SET claimed_at = CURRENT_TIMESTAMP
-         WHERE id = ?`
-      ).bind(invite.id),
+         WHERE id = ? AND EXISTS (SELECT 1 FROM api_keys WHERE id = ?)`
+      ).bind(invite.id, apiKey.id),
       c.env.DB.prepare(
         `UPDATE users
          SET display_name = ?, email_verified_at = COALESCE(email_verified_at, CURRENT_TIMESTAMP),
              updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?`
-      ).bind(nextDisplayName, invite.user_id),
+         WHERE id = ? AND EXISTS (SELECT 1 FROM api_keys WHERE id = ?)`
+      ).bind(nextDisplayName, invite.user_id, apiKey.id),
+      c.env.DB.prepare(
+        `INSERT INTO audit_logs
+         (id, workspace_id, actor_user_id, action, entity_type, entity_id, metadata_json)
+         SELECT ?, ?, ?, 'CLAIM_MEMBER_INVITE', 'membership', ?, ?
+         WHERE EXISTS (SELECT 1 FROM api_keys WHERE id = ?)`
+      ).bind(
+        newId('audit_'),
+        invite.workspace_id,
+        invite.user_id,
+        `${invite.workspace_id}:${invite.user_id}`,
+        JSON.stringify({ invite_id: invite.id, key_prefix: apiKey.keyPrefix }),
+        apiKey.id
+      ),
     ]);
 
-    await writeAudit(c.env.DB, {
-      workspaceId: invite.workspace_id,
-      actorUserId: invite.user_id,
-      action: 'CLAIM_MEMBER_INVITE',
-      entityType: 'membership',
-      entityId: `${invite.workspace_id}:${invite.user_id}`,
-      metadata: { invite_id: invite.id, key_prefix: apiKey.keyPrefix },
-    });
+    if (issuedKey.meta.changes !== 1) {
+      return error(c, 409, 'INVITE_NO_LONGER_VALID', 'Invite has already been claimed or is no longer valid');
+    }
 
     const response = ok(
       c,

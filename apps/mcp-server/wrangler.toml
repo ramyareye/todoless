@@ -10,6 +10,26 @@ routes = [
 
 [vars]
 TODOLESS_API_BASE_URL = "https://todoless.dev"
+ABUSE_PROTECTION = "on"
+
+[limits]
+cpu_ms = 500
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+invocation_logs = false
+
+[observability.traces]
+enabled = false
+
+[[ratelimits]]
+name = "REQUEST_RATE_LIMITER"
+namespace_id = "2026102904"
+simple = { limit = 300, period = 60 }
 
 [[services]]
 binding = "TODOLESS_API"

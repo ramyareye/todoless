@@ -4,6 +4,12 @@ import { hashApiKey } from './api-keys';
 
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+export function hashInviteToken(rawToken: string, pepper: string): Promise<string> {
+  // Old invitations were disclosed to inviters. They must not authenticate a
+  // recipient under the new email-only delivery policy, even before they expire.
+  return hashApiKey(`recipient-only-invite-v2:${rawToken}`, pepper);
+}
+
 export function extractInvitePrefix(rawToken: string): string | null {
   const parts = rawToken.split('_');
   if (parts.length !== 4) {
@@ -46,7 +52,7 @@ export async function issueInviteToken(
     id: newId('inv_'),
     raw,
     tokenPrefix: `tdls_invite_${tokenPrefix}`,
-    tokenHash: await hashApiKey(raw, env.API_KEY_PEPPER),
+    tokenHash: await hashInviteToken(raw, env.API_KEY_PEPPER),
     expiresAt: options?.expiresAt ?? new Date(Date.now() + INVITE_TTL_MS).toISOString(),
   };
 }

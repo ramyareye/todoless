@@ -4,8 +4,9 @@ import { ROLE_RANK } from '../lib/constants';
 import { newId } from '../lib/ids';
 import { error, jsonBody, ok, validationError } from '../lib/response';
 import type { AppEnv } from '../lib/types';
-import { writeAudit, writeProjectHistory } from '../services/audit';
-import { hasScope, requireMembership } from '../services/authz';
+import { prepareAudit, prepareProjectHistory } from '../services/audit';
+import { hasScope, requireMembership, membershipWriteGuard } from '../services/authz';
+import { requireProject, projectListFilter } from '../services/project-access';
 
 const createProjectSchema = z.object({
   name: z.string().min(1).max(100),
@@ -33,6 +34,7 @@ export function registerProjectRoutes(app: Hono<AppEnv>) {
       return membership.error;
     }
 
+    if (membership.projectIds !== null) return error(c,403,'FORBIDDEN','Project-restricted members cannot create projects');
     const body = await jsonBody(c);
     if (!body.ok) {
       return body.response;
@@ -47,14 +49,14 @@ export function registerProjectRoutes(app: Hono<AppEnv>) {
     const name = payload.name.trim();
     const description = payload.description?.trim() || null;
 
-    await c.env.DB.prepare(
-      `INSERT INTO projects (id, workspace_id, name, description)
-       VALUES (?, ?, ?, ?)`
+    const accessGuard = membershipWriteGuard(c,workspaceId);
+    const mutation = c.env.DB.prepare(
+      `INSERT INTO projects (id, workspace_id, name, description,last_mutation_id)
+       SELECT ?, ?, ?, ?, ? WHERE ${accessGuard.sql}`
     )
-      .bind(projectId, workspaceId, name, description)
-      .run();
+      .bind(projectId, workspaceId, name, description,projectId,...accessGuard.params);
 
-    await writeProjectHistory(c.env.DB, {
+    const history = prepareProjectHistory(c.env.DB, {
       workspaceId,
       projectId,
       actorUserId: principal.userId,
@@ -63,16 +65,19 @@ export function registerProjectRoutes(app: Hono<AppEnv>) {
       fromValue: null,
       toValue: { name, description },
       metadata: null,
-    });
+    }, {table:'projects',id:projectId,mutationId:projectId});
 
-    await writeAudit(c.env.DB, {
+    const audit = prepareAudit(c.env.DB, {
       workspaceId,
       actorUserId: principal.userId,
       action: 'CREATE_PROJECT',
       entityType: 'project',
       entityId: projectId,
       metadata: { name },
-    });
+    }, {table:'projects',id:projectId,mutationId:projectId});
+
+    const [written] = await c.env.DB.batch([mutation, history, audit]);
+    if(written.meta.changes!==1)return error(c,409,'VERSION_CONFLICT','Access changed during this request');
 
     return ok(
       c,
@@ -102,6 +107,7 @@ export function registerProjectRoutes(app: Hono<AppEnv>) {
     }
 
     const includeDeleted = c.req.query('include_deleted') === 'true';
+    const visible = projectListFilter(c,'id');
     if (includeDeleted && ROLE_RANK[membership.role] < ROLE_RANK.ADMIN) {
       return error(c, 403, 'FORBIDDEN', 'Only ADMIN+ can include deleted projects');
     }
@@ -110,18 +116,18 @@ export function registerProjectRoutes(app: Hono<AppEnv>) {
       ? await c.env.DB.prepare(
           `SELECT id, workspace_id, name, description, created_at, updated_at, deleted_at
            FROM projects
-           WHERE workspace_id = ?
+           WHERE workspace_id = ? AND ${visible.sql}
            ORDER BY created_at DESC`
         )
-          .bind(workspaceId)
+          .bind(workspaceId,...visible.params)
           .all()
       : await c.env.DB.prepare(
           `SELECT id, workspace_id, name, description, created_at, updated_at, deleted_at
            FROM projects
-           WHERE workspace_id = ? AND deleted_at IS NULL
+           WHERE workspace_id = ? AND deleted_at IS NULL AND ${visible.sql}
            ORDER BY created_at DESC`
         )
-          .bind(workspaceId)
+          .bind(workspaceId,...visible.params)
           .all();
 
     return ok(c, {
@@ -163,6 +169,8 @@ export function registerProjectRoutes(app: Hono<AppEnv>) {
       return membership.error;
     }
 
+    const denied = await requireProject(c,project.id);
+    if (denied || (membership.projectIds !== null && project.deleted_at)) return denied ?? error(c,404,'NOT_FOUND','Project not found');
     return ok(c, project);
   });
 
@@ -198,6 +206,7 @@ export function registerProjectRoutes(app: Hono<AppEnv>) {
     if ('error' in membership) {
       return membership.error;
     }
+    const denied = await requireProject(c,project.id);if(denied)return denied;
 
     const body = await jsonBody(c);
     if (!body.ok) {
@@ -221,15 +230,17 @@ export function registerProjectRoutes(app: Hono<AppEnv>) {
           ? null
           : payload.description.trim();
 
-    await c.env.DB.prepare(
+    const accessGuard=membershipWriteGuard(c,project.workspace_id);
+    const mutationId = newId('mut_');
+    const mutation = c.env.DB.prepare(
       `UPDATE projects
-       SET name = ?, description = ?, updated_at = CURRENT_TIMESTAMP
-       WHERE id = ?`
+       SET name = ?, description = ?, updated_at = CURRENT_TIMESTAMP, last_mutation_id = ?
+       WHERE id = ? AND name IS ? AND description IS ? AND deleted_at IS NULL AND ${accessGuard.sql}`
     )
-      .bind(nextName, nextDescription, projectId)
-      .run();
+      .bind(nextName, nextDescription, mutationId, projectId, project.name, project.description,...accessGuard.params);
+    const guard = { table: 'projects' as const, id: projectId, mutationId };
 
-    await writeProjectHistory(c.env.DB, {
+    const history = prepareProjectHistory(c.env.DB, {
       workspaceId: project.workspace_id,
       projectId,
       actorUserId: principal.userId,
@@ -238,25 +249,27 @@ export function registerProjectRoutes(app: Hono<AppEnv>) {
       fromValue: { name: project.name, description: project.description },
       toValue: { name: nextName, description: nextDescription },
       metadata: null,
-    });
+    }, guard);
 
-    await writeAudit(c.env.DB, {
+    const audit = prepareAudit(c.env.DB, {
       workspaceId: project.workspace_id,
       actorUserId: principal.userId,
       action: 'UPDATE_PROJECT',
       entityType: 'project',
       entityId: projectId,
       metadata: { name: nextName },
-    });
+    }, guard);
 
-    const updated = await c.env.DB.prepare(
+    const readUpdated = c.env.DB.prepare(
       `SELECT id, workspace_id, name, description, created_at, updated_at, deleted_at
        FROM projects
        WHERE id = ?
        LIMIT 1`
     )
-      .bind(projectId)
-      .first();
+      .bind(projectId);
+    const [written, , , snapshot] = await c.env.DB.batch([mutation, history, audit, readUpdated]);
+    if (written.meta.changes !== 1) return error(c, 409, 'VERSION_CONFLICT', 'Resource changed during this request');
+    const updated = snapshot.results[0];
 
     return ok(c, updated);
   });
@@ -295,15 +308,17 @@ export function registerProjectRoutes(app: Hono<AppEnv>) {
       return ok(c, { id: projectId, deleted: true, already_deleted: true });
     }
 
-    await c.env.DB.prepare(
+    const accessGuard=membershipWriteGuard(c,project.workspace_id);
+    const mutationId = newId('mut_');
+    const mutation = c.env.DB.prepare(
       `UPDATE projects
-       SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-       WHERE id = ?`
+       SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP, last_mutation_id = ?
+       WHERE id = ? AND deleted_at IS NULL AND ${accessGuard.sql}`
     )
-      .bind(projectId)
-      .run();
+      .bind(mutationId, projectId,...accessGuard.params);
+    const guard = { table: 'projects' as const, id: projectId, mutationId };
 
-    await writeProjectHistory(c.env.DB, {
+    const history = prepareProjectHistory(c.env.DB, {
       workspaceId: project.workspace_id,
       projectId,
       actorUserId: principal.userId,
@@ -312,16 +327,19 @@ export function registerProjectRoutes(app: Hono<AppEnv>) {
       fromValue: { deleted_at: null },
       toValue: { deleted_at: new Date().toISOString() },
       metadata: null,
-    });
+    }, guard);
 
-    await writeAudit(c.env.DB, {
+    const audit = prepareAudit(c.env.DB, {
       workspaceId: project.workspace_id,
       actorUserId: principal.userId,
       action: 'DELETE_PROJECT',
       entityType: 'project',
       entityId: projectId,
       metadata: null,
-    });
+    }, guard);
+
+    const [written] = await c.env.DB.batch([mutation, history, audit]);
+    if (written.meta.changes !== 1) return error(c, 409, 'VERSION_CONFLICT', 'Resource changed during this request');
 
     return ok(c, { id: projectId, deleted: true });
   });

@@ -1,12 +1,13 @@
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { createTodolessMcpServer, DEFAULT_API_BASE_URL } from './mcp-server.mjs';
+import { guardRequest } from './protection.mjs';
 
 const CORS_HEADERS = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET, POST, DELETE, OPTIONS',
   'access-control-allow-headers':
     'content-type, authorization, x-todoless-api-key, mcp-session-id, mcp-protocol-version, last-event-id',
-  'access-control-expose-headers': 'mcp-session-id, mcp-protocol-version',
+  'access-control-expose-headers': 'mcp-session-id, mcp-protocol-version, retry-after',
 };
 
 function jsonResponse(data, status = 200, headers = {}) {
@@ -70,6 +71,13 @@ function resolveUpstreamApiKey(request, env) {
 
 export default {
   async fetch(request, env) {
+    const guarded = await guardRequest(request, env);
+    if (!(guarded instanceof Request)) {
+      if (Math.random() < 0.01) console.warn(JSON.stringify({ event: guarded.event, service: 'todoless-mcp', request_id: `req_${crypto.randomUUID()}` }));
+      return jsonResponse({ jsonrpc: '2.0', id: null, error: { code: -32000, message: guarded.message } }, guarded.status,
+        { 'cache-control': 'no-store', ...([429, 503].includes(guarded.status) ? { 'retry-after': '60' } : {}) });
+    }
+    request = guarded;
     const url = new URL(request.url);
     const serviceBinding = env.TODOLESS_API || null;
     const fetchFn = serviceBinding ? serviceBinding.fetch.bind(serviceBinding) : fetch;
@@ -97,8 +105,8 @@ export default {
             content_type: upstreamResponse.headers.get('content-type'),
             body_prefix: upstreamText.slice(0, 120),
           };
-        } catch (err) {
-          upstream = { error: String(err) };
+        } catch {
+          upstream = { error: 'Upstream health probe failed' };
         }
       }
 
@@ -143,6 +151,15 @@ export default {
       );
     }
 
+    // This Worker has no persistent session for server-initiated messages.
+    // Decline the optional GET listener instead of opening an idle SSE stream.
+    if (request.method === 'GET') {
+      return jsonResponse({
+        jsonrpc: '2.0',
+        error: { code: -32000, message: 'Standalone event streams are unavailable; use MCP POST requests.' },
+      }, 405, { allow: 'POST, DELETE, OPTIONS', 'cache-control': 'no-store' });
+    }
+
     const apiBaseUrl = (env.TODOLESS_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/+$/, '');
     const server = createTodolessMcpServer({
       apiBaseUrl,
@@ -155,8 +172,13 @@ export default {
       sessionIdGenerator: undefined,
     });
 
-    await server.connect(transport);
-    const response = await transport.handleRequest(request);
-    return withCors(response);
+    try {
+      await server.connect(transport);
+      const response = await transport.handleRequest(request);
+      return withCors(response);
+    } catch {
+      console.error(JSON.stringify({ event: 'unhandled_error', service: 'todoless-mcp', request_id: `req_${crypto.randomUUID()}` }));
+      return jsonResponse({ jsonrpc: '2.0', id: null, error: { code: -32603, message: 'Internal server error' } }, 500, { 'cache-control': 'no-store' });
+    }
   },
 };

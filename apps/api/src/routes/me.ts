@@ -11,6 +11,7 @@ export function registerMeRoutes(app: Hono<AppEnv>) {
         email: principal.email,
       },
       scopes: principal.scopes,
+      workspace_id: principal.workspaceId ?? null,
       api_key_id: principal.apiKeyId,
     });
   });

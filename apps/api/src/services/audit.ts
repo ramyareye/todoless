@@ -1,7 +1,12 @@
 import type { ChangeReason, TaskPriority, TaskStatus } from '../lib/types';
 import { newId } from '../lib/ids';
 
-export async function writeAudit(
+type MutationGuard = { table: 'tasks' | 'projects'; id: string; mutationId: string };
+function guardSql(guard?: MutationGuard) {
+  return guard ? ` WHERE EXISTS (SELECT 1 FROM ${guard.table} WHERE id = ? AND last_mutation_id = ?)` : '';
+}
+
+export function prepareAudit(
   db: D1Database,
   args: {
     workspaceId: string | null;
@@ -10,12 +15,13 @@ export async function writeAudit(
     entityType: string;
     entityId: string | null;
     metadata: unknown;
-  }
+  },
+  guard?: MutationGuard
 ) {
-  await db.prepare(
+  return db.prepare(
     `INSERT INTO audit_logs
       (id, workspace_id, actor_user_id, action, entity_type, entity_id, metadata_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
+     SELECT ?, ?, ?, ?, ?, ?, ?${guardSql(guard)}`
   )
     .bind(
       newId('audit_'),
@@ -24,9 +30,13 @@ export async function writeAudit(
       args.action,
       args.entityType,
       args.entityId,
-      args.metadata ? JSON.stringify(args.metadata) : null
-    )
-    .run();
+      args.metadata ? JSON.stringify(args.metadata) : null,
+      ...(guard ? [guard.id, guard.mutationId] : [])
+    );
+}
+
+export async function writeAudit(db: D1Database, args: Parameters<typeof prepareAudit>[1]) {
+  await prepareAudit(db, args).run();
 }
 
 export function classifyTaskChangeType(
@@ -58,7 +68,7 @@ export function classifyTaskChangeType(
   return 'UPDATED';
 }
 
-export async function writeTaskHistory(
+export function prepareTaskHistory(
   db: D1Database,
   args: {
     workspaceId: string;
@@ -77,12 +87,13 @@ export async function writeTaskHistory(
     fromValue: unknown;
     toValue: unknown;
     metadata: unknown;
-  }
+  },
+  guard?: MutationGuard
 ) {
-  await db.prepare(
+  return db.prepare(
     `INSERT INTO task_history
       (id, workspace_id, task_id, actor_user_id, change_type, change_reason, from_value_json, to_value_json, metadata_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?${guardSql(guard)}`
   )
     .bind(
       newId('th_'),
@@ -93,12 +104,16 @@ export async function writeTaskHistory(
       args.changeReason,
       args.fromValue ? JSON.stringify(args.fromValue) : null,
       args.toValue ? JSON.stringify(args.toValue) : null,
-      args.metadata ? JSON.stringify(args.metadata) : null
-    )
-    .run();
+      args.metadata ? JSON.stringify(args.metadata) : null,
+      ...(guard ? [guard.id, guard.mutationId] : [])
+    );
 }
 
-export async function writeProjectHistory(
+export async function writeTaskHistory(db: D1Database, args: Parameters<typeof prepareTaskHistory>[1]) {
+  await prepareTaskHistory(db, args).run();
+}
+
+export function prepareProjectHistory(
   db: D1Database,
   args: {
     workspaceId: string;
@@ -109,12 +124,13 @@ export async function writeProjectHistory(
     fromValue: unknown;
     toValue: unknown;
     metadata: unknown;
-  }
+  },
+  guard?: MutationGuard
 ) {
-  await db.prepare(
+  return db.prepare(
     `INSERT INTO project_history
       (id, workspace_id, project_id, actor_user_id, change_type, change_reason, from_value_json, to_value_json, metadata_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?${guardSql(guard)}`
   )
     .bind(
       newId('ph_'),
@@ -125,7 +141,11 @@ export async function writeProjectHistory(
       args.changeReason,
       args.fromValue ? JSON.stringify(args.fromValue) : null,
       args.toValue ? JSON.stringify(args.toValue) : null,
-      args.metadata ? JSON.stringify(args.metadata) : null
-    )
-    .run();
+      args.metadata ? JSON.stringify(args.metadata) : null,
+      ...(guard ? [guard.id, guard.mutationId] : [])
+    );
+}
+
+export async function writeProjectHistory(db: D1Database, args: Parameters<typeof prepareProjectHistory>[1]) {
+  await prepareProjectHistory(db, args).run();
 }

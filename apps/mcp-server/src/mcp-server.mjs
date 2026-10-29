@@ -1,3 +1,7 @@
+import { timeTools, callTimeTool } from './time-tools.mjs';
+import { deliveryTools, callDeliveryTool } from './delivery-tools.mjs';
+import { portfolioTools, callPortfolioTool } from './portfolio-tools.mjs';
+import { projectAccessTools, callProjectAccessTool } from './project-access-tools.mjs';
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
@@ -62,6 +66,9 @@ export function createTodolessMcpServer({ apiBaseUrl, apiKey, fetchFn }) {
       body: body ? JSON.stringify(body) : undefined,
     });
 
+    if (response.ok && response.headers.get('content-type')?.includes('text/csv')) {
+      return { format: 'csv', filename: 'todoless-time.csv', csv: await response.text() };
+    }
     const payload = await response.json().catch(() => null);
     if (!payload || payload.success !== true) {
       const code = payload?.error?.code ?? `HTTP_${response.status}`;
@@ -75,6 +82,10 @@ export function createTodolessMcpServer({ apiBaseUrl, apiKey, fetchFn }) {
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
       tools: [
+        ...timeTools,
+        ...deliveryTools,
+        ...portfolioTools,
+        ...projectAccessTools,
         {
           name: "workspaces.list",
           description: "List workspaces for the authenticated user.",
@@ -115,13 +126,14 @@ export function createTodolessMcpServer({ apiBaseUrl, apiKey, fetchFn }) {
         },
         {
           name: "members.add",
-          description: "Add or re-invite a member to a workspace.",
+          description: "Add or re-invite a member only after explicit authorization. For a new project-restricted contributor include the exact project_ids in this request; omitting them grants workspace-wide access. Existing access changes use the owner-only versioned project-access tools.",
           inputSchema: {
             type: "object",
             properties: {
               workspace_id: { type: "string" },
               email: { type: "string" },
               role: { type: "string" },
+              project_ids: { type: 'array', items: { type: 'string', minLength: 1 }, maxItems: 50, uniqueItems: true },
             },
             required: ["workspace_id", "email", "role"],
             additionalProperties: false,
@@ -334,6 +346,14 @@ export function createTodolessMcpServer({ apiBaseUrl, apiKey, fetchFn }) {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const name = request.params.name;
     const args = request.params.arguments ?? {};
+    const projectAccessResult = await callProjectAccessTool(name, args, apiRequest);
+    if (projectAccessResult !== undefined) return textResult(projectAccessResult);
+    const portfolioResult = await callPortfolioTool(name, args, apiRequest);
+    if (portfolioResult !== undefined) return textResult(portfolioResult);
+    const timeResult = await callTimeTool(name, args, apiRequest);
+    const deliveryResult = await callDeliveryTool(name, args, apiRequest);
+    if (deliveryResult !== undefined) return textResult(deliveryResult);
+    if (timeResult !== undefined) return textResult(timeResult);
 
     if (name === "workspaces.list") {
       const data = await apiRequest(
@@ -388,7 +408,7 @@ export function createTodolessMcpServer({ apiBaseUrl, apiKey, fetchFn }) {
         "POST",
         `/v1/workspaces/${workspaceId}/members`,
         {
-          body: { email, role },
+          body: { email, role, ...(args.project_ids === undefined ? {} : { project_ids: args.project_ids }) },
         },
       );
       return textResult(data);

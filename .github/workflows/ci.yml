@@ -24,47 +24,18 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Configure local env
-        run: |
-          cat > .dev.vars <<'ENVVARS'
-          API_KEY_PEPPER=ci-test-secret-1234567890
-          ENVIRONMENT=dev
-          ENVVARS
+      - name: Install MCP dependencies
+        working-directory: apps/mcp-server
+        run: bun install
 
       - name: Typecheck
         run: bun run typecheck
 
-      - name: Apply local migrations
-        run: bun run db:migrate:local
+      - name: Security, concurrency and weekly review regressions
+        run: bun run test:security
 
-      - name: Start API server
+      - name: Bundled Worker API, smoke and MCP validation
         run: |
-          nohup bun run dev > /tmp/todoless-dev.log 2>&1 &
-          echo $! > /tmp/todoless-dev.pid
-
-      - name: Wait for health
-        run: |
-          for i in {1..60}; do
-            if curl -sf http://localhost:8787/v1/health >/dev/null; then
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "API did not become healthy in time"
-          cat /tmp/todoless-dev.log || true
-          exit 1
-
-      - name: Smoke test
-        env:
-          BASE_URL: http://localhost:8787
-        run: bun run smoke
-
-      - name: API behavior tests
-        env:
-          BASE_URL: http://localhost:8787
-        run: bun run test:api
-
-      - name: Stop API server
-        if: always()
-        run: |
-          kill "$(cat /tmp/todoless-dev.pid)" || true
+          bun run build:release
+          bun run test:recovery
+          bun run test:local --candidate

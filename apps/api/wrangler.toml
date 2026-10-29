@@ -5,6 +5,37 @@ compatibility_date = "2026-02-05"
 [vars]
 ENVIRONMENT = "prod"
 APP_BASE_URL = "https://todoless.dev"
+ABUSE_PROTECTION = "on"
+
+[limits]
+cpu_ms = 250
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+invocation_logs = false
+
+# Keep raw request URL spans out until credential/query redaction is verified.
+[observability.traces]
+enabled = false
+
+[[ratelimits]]
+name = "REQUEST_RATE_LIMITER"
+namespace_id = "2026102901"
+simple = { limit = 600, period = 60 }
+
+[[ratelimits]]
+name = "AUTH_RATE_LIMITER"
+namespace_id = "2026102902"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "USER_RATE_LIMITER"
+namespace_id = "2026102903"
+simple = { limit = 240, period = 60 }
 
 [[d1_databases]]
 binding = "DB"

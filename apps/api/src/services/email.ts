@@ -61,8 +61,10 @@ async function sendResendEmail(
   });
 
   if (!response.ok) {
-    const body = await response.text().catch(() => '');
-    throw new Error(`Resend error ${response.status}: ${body}`);
+    // Provider errors may echo the email/proof. Retain only a safe status and
+    // cancel the untrusted response instead of persisting its body in logs.
+    void response.body?.cancel().catch(() => {});
+    throw new Error(`Email provider rejected delivery (${response.status})`);
   }
 
   return { sent: true as const, skipped: false as const };
@@ -96,7 +98,7 @@ export function queueWelcomeEmail(
             `<p>If you registered via API, keep your personal API key secure.</p>`,
         });
       } catch (err) {
-        console.error('Welcome email failed', err);
+        console.error('Welcome email failed');
       }
     })()
   );
@@ -131,7 +133,7 @@ export function queueEmailVerificationEmail(
             `<p>This link expires on ${escapeHtml(expiresAtLabel)}.</p>`,
         });
       } catch (err) {
-        console.error('Email verification delivery failed', err);
+        console.error('Email verification delivery failed');
       }
     })()
   );
@@ -160,10 +162,30 @@ export function queueInviteEmail(
             `<p><a href="${escapeHtml(args.inviteUrl)}">Accept invitation</a></p>`,
         });
       } catch (err) {
-        console.error('Invite email failed', err);
+        console.error('Invite email failed');
       }
     })()
   );
+}
+
+// These functions are awaited by recovery's request-owned background work. The
+// caller deliberately logs no provider error body, which may echo secret links.
+export async function sendKeyRecoveryEmail(
+  c: Context<AppEnv>,
+  args: { email: string; recoveryUrl: string; expiresAt: string }
+) {
+  await sendResendEmail(c, {
+    to: args.email,
+    subject: 'Recover your Todoless personal key',
+    text: `A personal key recovery was requested for your Todoless account.\n\nOpen this link to choose the key to replace: ${args.recoveryUrl}\n\nIt expires on ${new Date(args.expiresAt).toUTCString()}. Opening the page does not change any key. If you did not request this, ignore this email.`,
+    html: `<p>A personal key recovery was requested for your Todoless account.</p><p><a href="${escapeHtml(args.recoveryUrl)}">Recover your personal key</a></p><p>This link expires on ${escapeHtml(new Date(args.expiresAt).toUTCString())}. Opening the page does not change any key. If you did not request this, ignore this email.</p>`
+  });
+}
+export async function sendKeyRecoveryNotice(
+  c: Context<AppEnv>, args: { email: string; revokedOldKey: boolean }
+) {
+  const text = `A replacement personal key was created for your Todoless account. ${args.revokedOldKey ? 'The selected old key was revoked.' : 'Your existing keys were kept.'} Your tasks and access have not changed. If this was not you, contact your workspace operator.`;
+  await sendResendEmail(c, { to: args.email, subject: 'Your Todoless personal key was recovered', text, html: `<p>${escapeHtml(text)}</p>` });
 }
 
 function escapeHtml(value: string) {

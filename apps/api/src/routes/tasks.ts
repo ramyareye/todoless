@@ -5,8 +5,10 @@ import { newId } from '../lib/ids';
 import { decodeCursor, encodeCursor, parseLimit } from '../lib/pagination';
 import { error, jsonBody, ok, validationError } from '../lib/response';
 import type { AppEnv, TaskPriority, TaskStatus } from '../lib/types';
-import { classifyTaskChangeType, writeAudit, writeTaskHistory } from '../services/audit';
-import { hasScope, requireMembership } from '../services/authz';
+import { classifyTaskChangeType, prepareAudit, prepareTaskHistory } from '../services/audit';
+import { hasScope, requireMembership, membershipWriteGuard } from '../services/authz';
+import { requireProject, projectListFilter, referenceAllowed, readableTasks, readableHistoryValue, memberCanAccessProjectSql, referenceWriteGuard } from '../services/project-access';
+import { activeTaskSql, freeActiveSlotSql, type Stage } from '../services/task-delivery';
 
 const createTaskSchema = z.object({
   project_id: z.string().min(1).optional(),
@@ -48,6 +50,7 @@ type TaskRow = {
   title: string;
   description: string | null;
   status: TaskStatus;
+  delivery_state: Stage | null;
   priority: TaskPriority;
   due_at: string | null;
   completed_at: string | null;
@@ -90,10 +93,13 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
     }
 
     const payload = parsed.data;
+    const denied = await requireProject(c,payload.project_id??null);if(denied)return denied;
+    if(payload.parent_task_id && membership.projectIds!==null && !await referenceAllowed(c,workspaceId,payload.parent_task_id))return error(c,404,'NOT_FOUND','Referenced task not found');
     const taskId = newId('tsk_');
     const title = payload.title.trim();
     const description = payload.description?.trim() || null;
     const status = payload.status ?? 'TODO';
+    if(membership.projectIds!==null && status!=='TODO')return error(c,409,'DELIVERY_REQUIRED','Create Backlog tasks, then use the delivery workflow');
     const priority = payload.priority ?? 'P2';
     const dueAt = payload.due_at ?? null;
     const metadataJson = payload.metadata ? JSON.stringify(payload.metadata) : null;
@@ -123,19 +129,23 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
 
     if (payload.assignee_user_id) {
       const assigneeMembership = await c.env.DB.prepare(
-        'SELECT id FROM memberships WHERE workspace_id = ? AND user_id = ? LIMIT 1'
+        `SELECT id FROM memberships m WHERE workspace_id = ? AND user_id = ? AND ${memberCanAccessProjectSql('m','?')} LIMIT 1`
       )
-        .bind(workspaceId, payload.assignee_user_id)
+        .bind(workspaceId, payload.assignee_user_id,payload.project_id??null,payload.project_id??null)
         .first<{ id: string }>();
       if (!assigneeMembership) {
         return error(c, 400, 'INVALID_ASSIGNEE', 'assignee_user_id is not a workspace member');
       }
     }
 
-    await c.env.DB.prepare(
+    const accessGuard=membershipWriteGuard(c,workspaceId);
+    const refsGuard=referenceWriteGuard(c,workspaceId,payload.parent_task_id?[payload.parent_task_id]:[],payload.project_id??null);
+    const mutation = c.env.DB.prepare(
       `INSERT INTO tasks
-        (id, workspace_id, project_id, parent_task_id, assignee_user_id, title, description, status, priority, due_at, completed_at, metadata_json, version)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
+        (id, workspace_id, project_id, parent_task_id, assignee_user_id, title, description, status, priority, due_at, completed_at, metadata_json, version, last_mutation_id,delivery_state)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?
+       WHERE (? IS NULL OR EXISTS (SELECT 1 FROM memberships m WHERE workspace_id = ? AND user_id = ? AND ${memberCanAccessProjectSql('m','?')}))
+         AND (? != 'IN_PROGRESS' OR ? IS NULL OR ${freeActiveSlotSql}) AND ${accessGuard.sql} AND ${refsGuard.sql}`
     )
       .bind(
         taskId,
@@ -149,11 +159,18 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
         priority,
         dueAt,
         completedAt,
-        metadataJson
-      )
-      .run();
+        metadataJson,
+        taskId,
+        membership.projectIds!==null?'BACKLOG':null,
+        payload.assignee_user_id ?? null,
+        workspaceId,
+        payload.assignee_user_id ?? null,
+        payload.project_id??null,payload.project_id??null,
+        status, payload.assignee_user_id ?? null, workspaceId, payload.assignee_user_id ?? null, taskId,...accessGuard.params,...refsGuard.params
+      );
+    const guard = { table: 'tasks' as const, id: taskId, mutationId: taskId };
 
-    await writeTaskHistory(c.env.DB, {
+    const history = prepareTaskHistory(c.env.DB, {
       workspaceId,
       taskId,
       actorUserId: principal.userId,
@@ -171,19 +188,22 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
         due_at: dueAt,
       },
       metadata: payload.metadata ?? null,
-    });
+    }, guard);
 
-    await writeAudit(c.env.DB, {
+    const audit = prepareAudit(c.env.DB, {
       workspaceId,
       actorUserId: principal.userId,
       action: 'CREATE_TASK',
       entityType: 'task',
       entityId: taskId,
       metadata: { title, status, priority },
-    });
+    }, guard);
+
+    const [written] = await c.env.DB.batch([mutation, history, audit]);
+    if (written.meta.changes !== 1) return error(c, 409, 'TASK_CONFLICT', 'Assignee membership or active work changed during this request');
 
     const created = await c.env.DB.prepare(
-      `SELECT id, workspace_id, project_id, parent_task_id, assignee_user_id, title, description, status, priority, due_at, completed_at, metadata_json, version, created_at, updated_at, deleted_at
+      `SELECT id, workspace_id, project_id, parent_task_id, assignee_user_id, title, description, status, priority, due_at, completed_at, metadata_json, version, delivery_state, created_at, updated_at, deleted_at
        FROM tasks
        WHERE id = ?
        LIMIT 1`
@@ -229,6 +249,8 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
 
     const whereClauses: string[] = ['workspace_id = ?'];
     const params: (string | number)[] = [workspaceId];
+    const visible = projectListFilter(c,'project_id');
+    whereClauses.push(visible.sql);params.push(...visible.params);
 
     if (!includeDeleted) {
       whereClauses.push('deleted_at IS NULL');
@@ -266,7 +288,7 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
     params.push(limit + 1);
 
     const rows = await c.env.DB.prepare(
-      `SELECT id, workspace_id, project_id, parent_task_id, assignee_user_id, title, description, status, priority, due_at, completed_at, metadata_json, version, created_at, updated_at, deleted_at
+      `SELECT id, workspace_id, project_id, parent_task_id, assignee_user_id, title, description, status, priority, due_at, completed_at, metadata_json, version, delivery_state, created_at, updated_at, deleted_at
        FROM tasks
        WHERE ${whereClauses.join(' AND ')}
        ORDER BY updated_at DESC, id DESC
@@ -294,7 +316,7 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
         limit,
         cursor: cursor ? c.req.query('cursor') ?? null : null,
       },
-      tasks: page,
+      tasks: await readableTasks(c,workspaceId,page),
       pagination: {
         limit,
         next_cursor: nextCursor,
@@ -311,7 +333,7 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
 
     const taskId = c.req.param('taskId');
     const task = await c.env.DB.prepare(
-      `SELECT id, workspace_id, project_id, parent_task_id, assignee_user_id, title, description, status, priority, due_at, completed_at, metadata_json, version, created_at, updated_at, deleted_at
+      `SELECT id, workspace_id, project_id, parent_task_id, assignee_user_id, title, description, status, priority, due_at, completed_at, metadata_json, version, delivery_state, created_at, updated_at, deleted_at
        FROM tasks
        WHERE id = ?
        LIMIT 1`
@@ -327,8 +349,10 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
     if ('error' in membership) {
       return membership.error;
     }
+    const denied = await requireProject(c,task.project_id);if(denied)return denied;
+    if(membership.projectIds!==null && task.deleted_at)return error(c,404,'NOT_FOUND','Task not found');
 
-    return ok(c, task);
+    return ok(c, (await readableTasks(c,task.workspace_id,[task]))[0]);
   });
 
   app.get('/v1/tasks/:taskId/history', async (c) => {
@@ -339,13 +363,13 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
 
     const taskId = c.req.param('taskId');
     const task = await c.env.DB.prepare(
-      `SELECT id, workspace_id
+      `SELECT id, workspace_id, project_id, deleted_at
        FROM tasks
        WHERE id = ?
        LIMIT 1`
     )
       .bind(taskId)
-      .first<{ id: string; workspace_id: string }>();
+      .first<{ id: string; workspace_id: string; project_id:string|null;deleted_at:string|null }>();
 
     if (!task) {
       return error(c, 404, 'NOT_FOUND', 'Task not found');
@@ -355,10 +379,20 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
     if ('error' in membership) {
       return membership.error;
     }
+    const denied = await requireProject(c,task.project_id);if(denied)return denied;
+    if(membership.projectIds!==null && task.deleted_at)return error(c,404,'NOT_FOUND','Task not found');
 
     const limit = parseLimit(c.req.query('limit'), 50, 100);
     const cursor = decodeCursor(c.req.query('cursor'));
     const whereClauses = ['th.task_id = ?'];
+    if(membership.projectIds!==null) {
+      // A task deliberately shared after a move must not expose its old private project history.
+      const hidden=await c.env.DB.prepare(`SELECT 1 FROM task_history WHERE task_id=? AND (
+        (json_extract(from_value_json,'$.project_id') IS NOT NULL AND json_extract(from_value_json,'$.project_id') NOT IN (SELECT value FROM json_each(?))) OR
+        (json_extract(to_value_json,'$.project_id') IS NOT NULL AND json_extract(to_value_json,'$.project_id') NOT IN (SELECT value FROM json_each(?)))) LIMIT 1`)
+        .bind(taskId,JSON.stringify(membership.projectIds),JSON.stringify(membership.projectIds)).first();
+      if(hidden)return error(c,403,'HISTORY_RESTRICTED','An owner must review history from outside your project access');
+    }
     const params: (string | number)[] = [taskId];
 
     if (cursor) {
@@ -404,7 +438,7 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
         created_at: string;
       }>();
 
-    const entries = (rows.results ?? []).map((row) => ({
+    const entries = await Promise.all((rows.results ?? []).map(async (row) => ({
       id: row.id,
       workspace_id: row.workspace_id,
       task_id: row.task_id,
@@ -417,11 +451,11 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
         : null,
       change_type: row.change_type,
       change_reason: row.change_reason,
-      from_value: parseJsonValue(row.from_value_json),
-      to_value: parseJsonValue(row.to_value_json),
+      from_value: membership.projectIds===null ? parseJsonValue(row.from_value_json) : await readableHistoryValue(c,task.workspace_id,parseJsonValue(row.from_value_json)),
+      to_value: membership.projectIds===null ? parseJsonValue(row.to_value_json) : await readableHistoryValue(c,task.workspace_id,parseJsonValue(row.to_value_json)),
       metadata: parseJsonValue(row.metadata_json),
       created_at: row.created_at,
-    }));
+    })));
 
     const hasMore = entries.length > limit;
     const page = hasMore ? entries.slice(0, limit) : entries;
@@ -447,7 +481,7 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
 
     const taskId = c.req.param('taskId');
     const task = await c.env.DB.prepare(
-      `SELECT id, workspace_id, project_id, parent_task_id, assignee_user_id, title, description, status, priority, due_at, completed_at, metadata_json, version, created_at, updated_at, deleted_at
+      `SELECT id, workspace_id, project_id, parent_task_id, assignee_user_id, title, description, status, priority, due_at, completed_at, metadata_json, version, delivery_state, created_at, updated_at, deleted_at
        FROM tasks
        WHERE id = ?
        LIMIT 1`
@@ -463,6 +497,8 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
     if ('error' in membership) {
       return membership.error;
     }
+    const denied = await requireProject(c,task.project_id);if(denied)return denied;
+    if(membership.projectIds!==null && task.deleted_at)return error(c,404,'NOT_FOUND','Task not found');
 
     const body = await jsonBody(c);
     if (!body.ok) {
@@ -475,6 +511,10 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
 
     const payload = parsed.data;
     const versionHeader = c.req.header('if-match-version');
+    if(membership.projectIds!==null && ['REVIEW','VERIFY','DONE'].includes(task.delivery_state??task.status))
+      return error(c,409,'REWORK_REQUIRED','Return reviewed work through the delivery workflow before changing its fields');
+    const projectDenied=await requireProject(c,payload.project_id===undefined?task.project_id:payload.project_id);if(projectDenied)return projectDenied;
+    if(payload.parent_task_id && membership.projectIds!==null && !await referenceAllowed(c,task.workspace_id,payload.parent_task_id))return error(c,404,'NOT_FOUND','Referenced task not found');
     const expectedVersion = payload.version ?? (versionHeader ? Number.parseInt(versionHeader, 10) : null);
 
     if (!expectedVersion || !Number.isInteger(expectedVersion)) {
@@ -482,7 +522,7 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
     }
 
     if (expectedVersion !== task.version) {
-      return error(c, 409, 'VERSION_CONFLICT', 'Task version mismatch', { current: task });
+      return error(c, 409, 'VERSION_CONFLICT', 'Task version mismatch', { current: (await readableTasks(c,task.workspace_id,[task]))[0] });
     }
 
     if (payload.project_id !== undefined && payload.project_id !== null) {
@@ -512,9 +552,9 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
 
     if (payload.assignee_user_id !== undefined && payload.assignee_user_id !== null) {
       const assigneeMembership = await c.env.DB.prepare(
-        'SELECT id FROM memberships WHERE workspace_id = ? AND user_id = ? LIMIT 1'
+        `SELECT id FROM memberships m WHERE workspace_id = ? AND user_id = ? AND ${memberCanAccessProjectSql('m','?')} LIMIT 1`
       )
-        .bind(task.workspace_id, payload.assignee_user_id)
+        .bind(task.workspace_id, payload.assignee_user_id,payload.project_id===undefined?task.project_id:payload.project_id,payload.project_id===undefined?task.project_id:payload.project_id)
         .first<{ id: string }>();
       if (!assigneeMembership) {
         return error(c, 400, 'INVALID_ASSIGNEE', 'assignee_user_id is not a workspace member');
@@ -522,6 +562,7 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
     }
 
     const nextStatus = payload.status ?? task.status;
+    if(membership.projectIds!==null && nextStatus!==task.status)return error(c,409,'DELIVERY_REQUIRED','Use the delivery workflow for status changes');
     const nextPriority = payload.priority ?? task.priority;
     const nextTitle = payload.title?.trim() ?? task.title;
     const nextDescription =
@@ -543,6 +584,14 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
           ? null
           : JSON.stringify(payload.metadata);
 
+    // Managed delivery changes must pass its readiness, dependency and review checks.
+    // An admin can repair a deleted task's departed assignee before restoring it.
+    const repairDeletedAssignee = task.deleted_at && ROLE_RANK[membership.role] >= ROLE_RANK.ADMIN;
+    if (task.delivery_state && (nextStatus !== task.status || (!repairDeletedAssignee && nextAssigneeUserId !== task.assignee_user_id) || nextProjectId !== task.project_id)) {
+      return error(c, 409, 'DELIVERY_MANAGED', 'Use the delivery endpoint to change stage, assignment or project');
+    }
+    const nextActive = !task.deleted_at && (task.delivery_state === 'ACTIVE' || (!task.delivery_state && nextStatus === 'IN_PROGRESS'));
+
     const nextCompletedAt =
       payload.status === undefined
         ? task.completed_at
@@ -550,7 +599,10 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
           ? task.completed_at ?? new Date().toISOString()
           : null;
 
-    await c.env.DB.prepare(
+    const accessGuard=membershipWriteGuard(c,task.workspace_id);
+    const refsGuard=referenceWriteGuard(c,task.workspace_id,payload.parent_task_id?[payload.parent_task_id]:[],nextProjectId);
+    const mutationId = newId('mut_');
+    const mutation = c.env.DB.prepare(
       `UPDATE tasks
        SET
          project_id = ?,
@@ -564,8 +616,10 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
          completed_at = ?,
          metadata_json = ?,
          version = version + 1,
-         updated_at = CURRENT_TIMESTAMP
-       WHERE id = ? AND version = ?`
+         updated_at = CURRENT_TIMESTAMP, last_mutation_id = ?
+       WHERE id = ? AND version = ?
+         AND (? IS NULL OR EXISTS (SELECT 1 FROM memberships m WHERE workspace_id = ? AND user_id = ? AND ${memberCanAccessProjectSql('m','?')}))
+         AND (? = 0 OR ? IS NULL OR ${freeActiveSlotSql}) AND ${accessGuard.sql} AND ${refsGuard.sql}`
     )
       .bind(
         nextProjectId,
@@ -578,21 +632,18 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
         nextDueAt,
         nextCompletedAt,
         nextMetadataJson,
+        mutationId,
         taskId,
-        expectedVersion
-      )
-      .run();
+        expectedVersion,
+        nextAssigneeUserId,
+        task.workspace_id,
+        nextAssigneeUserId,
+        nextProjectId,nextProjectId,
+        nextActive ? 1 : 0, nextAssigneeUserId, task.workspace_id, nextAssigneeUserId, taskId,...accessGuard.params,...refsGuard.params
+      );
+    const guard = { table: 'tasks' as const, id: taskId, mutationId };
 
-    const updated = await c.env.DB.prepare(
-      `SELECT id, workspace_id, project_id, parent_task_id, assignee_user_id, title, description, status, priority, due_at, completed_at, metadata_json, version, created_at, updated_at, deleted_at
-       FROM tasks
-       WHERE id = ?
-       LIMIT 1`
-    )
-      .bind(taskId)
-      .first();
-
-    await writeTaskHistory(c.env.DB, {
+    const history = prepareTaskHistory(c.env.DB, {
       workspaceId: task.workspace_id,
       taskId,
       actorUserId: principal.userId,
@@ -628,18 +679,29 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
         version: task.version + 1,
       },
       metadata: null,
-    });
+    }, guard);
 
-    await writeAudit(c.env.DB, {
+    const audit = prepareAudit(c.env.DB, {
       workspaceId: task.workspace_id,
       actorUserId: principal.userId,
       action: 'UPDATE_TASK',
       entityType: 'task',
       entityId: taskId,
       metadata: { status: nextStatus, priority: nextPriority },
-    });
+    }, guard);
 
-    return ok(c, updated);
+    const readUpdated = c.env.DB.prepare(
+      `SELECT id, workspace_id, project_id, parent_task_id, assignee_user_id, title, description, status, priority, due_at, completed_at, metadata_json, version, delivery_state, created_at, updated_at, deleted_at
+       FROM tasks
+       WHERE id = ?
+       LIMIT 1`
+    )
+      .bind(taskId);
+    const [written, , , snapshot] = await c.env.DB.batch([mutation, history, audit, readUpdated]);
+    if (written.meta.changes !== 1) return error(c, 409, 'VERSION_CONFLICT', 'Resource changed during this request');
+    const updated = snapshot.results[0];
+
+    return ok(c, (await readableTasks(c,task.workspace_id,[updated as TaskRow]))[0]);
   });
 
   app.delete('/v1/tasks/:taskId', async (c) => {
@@ -650,13 +712,13 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
 
     const taskId = c.req.param('taskId');
     const task = await c.env.DB.prepare(
-      `SELECT id, workspace_id, deleted_at
+      `SELECT id, workspace_id, project_id, deleted_at, version, assignee_user_id, status, delivery_state
        FROM tasks
        WHERE id = ?
        LIMIT 1`
     )
       .bind(taskId)
-      .first<{ id: string; workspace_id: string; deleted_at: string | null }>();
+      .first<{ id: string; workspace_id: string; project_id:string|null; deleted_at: string | null; version: number; assignee_user_id: string | null; status: TaskStatus; delivery_state: Stage | null }>();
 
     if (!task) {
       return error(c, 404, 'NOT_FOUND', 'Task not found');
@@ -666,20 +728,24 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
     if ('error' in membership) {
       return membership.error;
     }
+    const denied = await requireProject(c,task.project_id);if(denied)return denied;
+    if(membership.projectIds!==null && task.deleted_at)return error(c,404,'NOT_FOUND','Task not found');
 
     if (task.deleted_at) {
       return ok(c, { id: taskId, deleted: true, already_deleted: true });
     }
 
-    await c.env.DB.prepare(
+    const accessGuard=membershipWriteGuard(c,task.workspace_id);
+    const mutationId = newId('mut_');
+    const mutation = c.env.DB.prepare(
       `UPDATE tasks
-       SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP, version = version + 1
-       WHERE id = ?`
+       SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP, last_mutation_id = ?, version = version + 1
+       WHERE id = ? AND deleted_at IS NULL AND version=? AND ${accessGuard.sql}`
     )
-      .bind(taskId)
-      .run();
+      .bind(mutationId, taskId,task.version,...accessGuard.params);
+    const guard = { table: 'tasks' as const, id: taskId, mutationId };
 
-    await writeTaskHistory(c.env.DB, {
+    const history = prepareTaskHistory(c.env.DB, {
       workspaceId: task.workspace_id,
       taskId,
       actorUserId: principal.userId,
@@ -688,16 +754,19 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
       fromValue: { deleted_at: null },
       toValue: { deleted_at: new Date().toISOString() },
       metadata: null,
-    });
+    }, guard);
 
-    await writeAudit(c.env.DB, {
+    const audit = prepareAudit(c.env.DB, {
       workspaceId: task.workspace_id,
       actorUserId: principal.userId,
       action: 'DELETE_TASK',
       entityType: 'task',
       entityId: taskId,
       metadata: null,
-    });
+    }, guard);
+
+    const [written] = await c.env.DB.batch([mutation, history, audit]);
+    if (written.meta.changes !== 1) return error(c, 409, 'VERSION_CONFLICT', 'Resource changed during this request');
 
     return ok(c, { id: taskId, deleted: true });
   });
@@ -710,13 +779,13 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
 
     const taskId = c.req.param('taskId');
     const task = await c.env.DB.prepare(
-      `SELECT id, workspace_id, deleted_at
+      `SELECT id, workspace_id, project_id, deleted_at, version, assignee_user_id, status, delivery_state
        FROM tasks
        WHERE id = ?
        LIMIT 1`
     )
       .bind(taskId)
-      .first<{ id: string; workspace_id: string; deleted_at: string | null }>();
+      .first<{ id: string; workspace_id: string; project_id:string|null; deleted_at: string | null; version: number; assignee_user_id: string | null; status: TaskStatus; delivery_state: Stage | null }>();
 
     if (!task) {
       return error(c, 404, 'NOT_FOUND', 'Task not found');
@@ -726,20 +795,26 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
     if ('error' in membership) {
       return membership.error;
     }
+    const denied = await requireProject(c,task.project_id);if(denied)return denied;
+    if(membership.projectIds!==null && task.deleted_at)return error(c,404,'NOT_FOUND','Task not found');
 
     if (!task.deleted_at) {
       return ok(c, { id: taskId, restored: true, already_restored: true });
     }
 
-    await c.env.DB.prepare(
+    const accessGuard=membershipWriteGuard(c,task.workspace_id);
+    const mutationId = newId('mut_');
+    const mutation = c.env.DB.prepare(
       `UPDATE tasks
-       SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP, version = version + 1
-       WHERE id = ?`
+       SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP, last_mutation_id = ?, version = version + 1
+       WHERE id = ? AND deleted_at IS NOT NULL AND version = ?
+         AND (assignee_user_id IS NULL OR EXISTS (SELECT 1 FROM memberships m WHERE m.workspace_id = tasks.workspace_id AND m.user_id = tasks.assignee_user_id))
+         AND (NOT ${activeTaskSql} OR assignee_user_id IS NULL OR ${freeActiveSlotSql}) AND ${accessGuard.sql}`
     )
-      .bind(taskId)
-      .run();
+      .bind(mutationId, taskId, task.version, task.workspace_id, task.assignee_user_id, taskId,...accessGuard.params);
+    const guard = { table: 'tasks' as const, id: taskId, mutationId };
 
-    await writeTaskHistory(c.env.DB, {
+    const history = prepareTaskHistory(c.env.DB, {
       workspaceId: task.workspace_id,
       taskId,
       actorUserId: principal.userId,
@@ -748,16 +823,19 @@ export function registerTaskRoutes(app: Hono<AppEnv>) {
       fromValue: { deleted_at: task.deleted_at },
       toValue: { deleted_at: null },
       metadata: null,
-    });
+    }, guard);
 
-    await writeAudit(c.env.DB, {
+    const audit = prepareAudit(c.env.DB, {
       workspaceId: task.workspace_id,
       actorUserId: principal.userId,
       action: 'RESTORE_TASK',
       entityType: 'task',
       entityId: taskId,
       metadata: null,
-    });
+    }, guard);
+
+    const [written] = await c.env.DB.batch([mutation, history, audit]);
+    if (written.meta.changes !== 1) return error(c, 409, 'VERSION_CONFLICT', 'Resource changed during this request');
 
     return ok(c, { id: taskId, restored: true });
   });

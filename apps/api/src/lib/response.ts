@@ -16,7 +16,7 @@ export function ok(c: Context<AppEnv>, data: unknown, status: 200 | 201 = 200) {
 
 export function error(
   c: Context<AppEnv>,
-  status: 400 | 401 | 403 | 404 | 409 | 415 | 429 | 500,
+  status: 400 | 401 | 403 | 404 | 409 | 413 | 415 | 429 | 500 | 503,
   code: string,
   message: string,
   details?: unknown

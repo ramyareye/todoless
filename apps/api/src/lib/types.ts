@@ -2,11 +2,7 @@ export type Role = 'OWNER' | 'ADMIN' | 'MEMBER' | 'VIEWER';
 export type TaskStatus = 'TODO' | 'IN_PROGRESS' | 'DONE' | 'ARCHIVED';
 export type TaskPriority = 'P0' | 'P1' | 'P2' | 'P3';
 export type ChangeReason =
-  | 'manual'
-  | 'deadline_shift'
-  | 'dependency_blocked'
-  | 'rebalancing'
-  | 'system';
+  'manual' | 'deadline_shift' | 'dependency_blocked' | 'rebalancing' | 'system';
 
 export type Scope =
   | 'workspace:read'
@@ -16,7 +12,8 @@ export type Scope =
   | 'apikeys:write'
   | '*';
 
-export interface EnvBindings {
+export interface EnvBindings extends Partial<Pick<ApiWorkerBindings,
+  'ABUSE_PROTECTION' | 'REQUEST_RATE_LIMITER' | 'AUTH_RATE_LIMITER' | 'USER_RATE_LIMITER'>> {
   DB: D1Database;
   ENVIRONMENT?: string;
   API_KEY_PEPPER?: string;
@@ -37,6 +34,13 @@ export interface Principal {
 export interface Variables {
   requestId: string;
   principal: Principal;
+  projectAccess: {
+    workspaceId: string;
+    membershipId: string;
+    version: number;
+    projectIds: string[] | null;
+    minimumRole: Role;
+  };
 }
 
 export type AppEnv = {
